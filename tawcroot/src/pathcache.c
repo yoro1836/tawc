@@ -199,6 +199,17 @@ int tawcroot_pathcache_known_plain(const char *suffix)
 	       ep >= load(&g_pc->hdr.floor);
 }
 
+int tawcroot_pathcache_unchanged_since(const char *suffix, uint64_t epoch)
+{
+	if (!g_pc || !epoch || epoch < load(&g_pc->hdr.floor)) return 0;
+	size_t len = suffix ? tawc_strlen(suffix) : 0;
+	if (len == 0) return 1;   /* the root itself: covered by the floor */
+	if (suffix[len - 1] == '/') return 0;
+	uint64_t h1, h2, newest;
+	if (!hash_suffix(suffix, len, &h1, &h2, &newest)) return 0;
+	return epoch >= newest;
+}
+
 void tawcroot_pathcache_note_plain(const char *suffix, uint64_t epoch)
 {
 	if (!g_pc || !epoch) return;

@@ -531,9 +531,6 @@ backed by a very large profiled win.
   synthesized btime + idle-only cpu line because procps `ps`
   hard-requires `btime`, and `/proc/uptime` reports idle equal to
   uptime so the two agree.)
-- **fd-provenance table** (perf; profile first). Track
-  fd → rootfs/bind/host provenance at fd creation/dup sites to avoid
-  `/proc/self/fd/<n>` readlinks on fd-relative path operations.
 
 Considered and rejected — don't re-propose without new evidence:
 

@@ -35,6 +35,7 @@
 #include "linkstore.h"
 #include "path.h"
 #include "path_oracle.h"
+#include "fdpath.h"
 #include "pathcache.h"
 #include "stats.h"
 #include "path_orchestrate.h"
@@ -274,13 +275,19 @@ long tawcroot_fd_to_guest_abs(int fd, char *out, size_t out_cap)
 	if (fd < 0 || fd == AT_FDCWD) return TAWC_EINVAL;
 	if (out_cap < 2) return TAWC_ENAMETOOLONG;
 
+	struct tawcroot_fdpath_probe probe;
+	long hit = tawcroot_fdpath_lookup(fd, out, out_cap, &probe);
+	if (hit >= 0) return hit;
+
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
 	char *host = scratch->buf[0];
 	long n = tawcroot_proc_fd_to_host_path(
 		fd, host, TAWCROOT_PATH_SCRATCH_SIZE);
 	if (n < 0) return n;
 
-	return tawcroot_host_path_to_guest_abs(host, (size_t)n, out, out_cap);
+	long g = tawcroot_host_path_to_guest_abs(host, (size_t)n, out, out_cap);
+	if (g > 0) tawcroot_fdpath_fill(fd, &probe, out, (size_t)g, host, (size_t)n);
+	return g;
 }
 
 /* Well-known-symlink memoization. After fold_absolute, the orchestrator

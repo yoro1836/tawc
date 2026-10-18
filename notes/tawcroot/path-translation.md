@@ -213,6 +213,20 @@ prefix, "readlinkat returned `-EINVAL`" (exists, not a symlink).
 
 Unit coverage: `tests/unit/test_pathcache.c`.
 
+### fd path cache
+
+Every dirfd-relative path is lifted to guest-absolute through the
+dirfd's `/proc/self/fd` link (`translate_local`); `find`/`tar`/`grep`
+issue thousands. `include/fdpath.h` caches fd → guest path per process
+and revalidates on each use: `fstat` must still report the cached
+dev/ino (a closed-and-reused fd number, `dup2` over it, or a vfork
+child's diverged table never serves a stale path), the shared path
+cache must report no mutation of the path or any ancestor since the
+fill (rename/rmdir while the fd stays open), and the root view must be
+unchanged. Only plain rootfs paths are cached (the path cache stamps no
+bind names), and nothing is cached with the path cache off. Tests:
+`tests/hosted/test_fdpath.c`.
+
 ### DAC override
 
 tawcroot fakes uid 0, but the kernel sees the app uid on every real

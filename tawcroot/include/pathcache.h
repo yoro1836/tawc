@@ -51,6 +51,12 @@ uint64_t tawcroot_pathcache_epoch(void);
  * and not be a symlink. */
 int tawcroot_pathcache_known_plain(const char *suffix);
 
+/* 1 when rootfs-relative `suffix` ("" = the root) and every prefix of
+ * it have had no reported mutation since `epoch` (read before the
+ * observation being validated) and no invalidation since. 0 when the
+ * cache is off. Lets other caches key facts on a guest path. */
+int tawcroot_pathcache_unchanged_since(const char *suffix, uint64_t epoch);
+
 /* Record readlinkat(rootfs_fd, suffix) == -EINVAL, observed at `epoch`. */
 void tawcroot_pathcache_note_plain(const char *suffix, uint64_t epoch);
 

@@ -134,7 +134,8 @@ def main():
         if d[48]:
             print(f"   path cache: {d[49]}/{d[48]} probes answered from cache")
         print(f"   /proc/self/fd readlinks {d[50]}: dirfd lift {d[51]},"
-              f" fstat nlink {d[52]}, getdents {d[53]} (own), ro-bind {d[54]}")
+              f" fstat nlink {d[52]}, getdents {d[53]} (own), ro-bind {d[54]};"
+              f" fd path cache hits {d[55]}")
         top_inner = sorted(range(NR_MAX), key=lambda n: -inner[n])[:8]
         print("   tawcroot's own syscalls:", ", ".join(
             f"{names.get(n, n)} {inner[n]}" for n in top_inner if inner[n]))

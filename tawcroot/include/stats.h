@@ -24,6 +24,7 @@ enum {
 	TAWCROOT_EV_FSTAT_NLINK,      /* fd_object_nlink probing a fd */
 	TAWCROOT_EV_GETDENTS_CLASSIFY,/* getdents64 classifying its fd */
 	TAWCROOT_EV_RO_BIND_FD,       /* fd_in_ro_bind */
+	TAWCROOT_EV_FDPATH_HIT,       /* fd -> guest path served from cache */
 };
 
 /* --exec-child phases (tawcroot_stats_mark). */
