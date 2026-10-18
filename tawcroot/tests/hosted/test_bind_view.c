@@ -68,6 +68,11 @@ test(hosted_bind_view_regular_file)
 
 test(hosted_bind_view_unix_socket)
 {
+#if defined(__ANDROID__)
+    printf("    skipping (host-only: Android shell SELinux denies"
+           " filesystem AF_UNIX socket creation under test rootfs)\n");
+    return;
+#endif
     th_view v;
     th_setup(&v, "bind-socket");
     int server = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);

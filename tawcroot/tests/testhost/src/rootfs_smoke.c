@@ -3124,10 +3124,13 @@ static int test_guest_seccomp_prctl_handling(void)
 		{ 1, {0, 0, 0}, (uint64_t)(uintptr_t)&kill_insn };
 	INLINE_SYS6(TAWC_SYS_seccomp, 1, 0, 0, 0, 0, 0, rv);
 	fails += tawc_io_step("seccomp probe -> ENOSYS", rv == TAWC_ENOSYS);
+	/* A KILL-everything filter: fake-accepted, never installed, so the
+	 * steps after it still run (notes/tawcroot/sigsys-handler.md
+	 * "Guest signal/seccomp control"). */
 	INLINE_SYS6(TAWC_SYS_seccomp, 1, 0, (long)&fprog, 0, 0, 0, rv);
-	fails += tawc_io_step("seccomp filter -> ENOSYS", rv == TAWC_ENOSYS);
+	fails += tawc_io_step("seccomp filter -> 0 (not installed)", rv == 0);
 	INLINE_SYS6(TAWC_SYS_prctl, 22, 2, (long)&fprog, 0, 0, 0, rv);
-	fails += tawc_io_step("prctl guest filter -> EINVAL", rv == TAWC_EINVAL);
+	fails += tawc_io_step("prctl guest filter -> 0 (not installed)", rv == 0);
 	INLINE_SYS6(TAWC_SYS_seccomp, 0, 0, 0, 0, 0, 0, rv);
 	fails += tawc_io_step("seccomp strict -> ENOSYS", rv == TAWC_ENOSYS);
 	INLINE_SYS6(TAWC_SYS_prctl, 21, 0, 0, 0, 0, 0, rv);
