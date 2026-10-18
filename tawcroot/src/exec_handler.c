@@ -16,6 +16,7 @@
 #include "loader_exec.h"
 #include "loader_map.h"
 #include "path.h"
+#include "rescue.h"
 #include "proc_shadow.h"
 #include "raw_sys.h"
 #include "shm.h"
@@ -117,7 +118,7 @@ static long classify_loadable(int fd, int depth, size_t *title_extra,
 	*title_extra += tawc_strlen(interp) + 1;
 	if (sarg) *title_extra += tawc_strlen(sarg) + 1;
 
-	long ifd = tawcroot_open_in_view(interp);
+	long ifd = tawcroot_rescue_open_in_view(interp);
 	if (ifd < 0) return ifd;  /* missing interpreter → ENOENT, etc. */
 	long ck = probe_check_executable((int)ifd, NULL);
 	if (ck == 0) ck = classify_loadable((int)ifd, depth + 1, title_extra, img);
@@ -151,7 +152,9 @@ static long prepare(const char *path, int argc,
 	size_t title_extra = 0;
 	unsigned int setid_mode = 0;
 	{
-		long probe = tawcroot_open_in_view(path);
+		/* Rescue per open (rescue.h): the dispatch-level retry is
+		 * skipped for exec, whose terminal call must run once. */
+		long probe = tawcroot_rescue_open_in_view(path);
 		if (probe < 0) return probe;
 		unsigned mode = 0;
 		long ck = probe_check_executable((int)probe, &mode);

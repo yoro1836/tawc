@@ -15,9 +15,8 @@
  *
  * Slot lifetime. The slot is released when the wrapper returns.
  * `exit(2)` must not be trapped: musl can unmap its stack before
- * calling it. The exec commit path calls tawcroot_rescue_restore()
- * and then replaces the process image (fresh BSS, whole table gone).
- * A slot can leak across fork: a multi-threaded guest that forks while
+ * calling it. exec is never retried here (see dispatch_call); its
+ * opens restore their own widening before the terminal re-exec. A slot can leak across fork: a multi-threaded guest that forks while
  * a sibling thread is mid-rescue leaves that sibling's slot claimed in
  * the child. Bounded (one per concurrently-rescuing sibling per fork)
  * and self-healing on tid reuse, since a claim first reclaims any slot
@@ -285,11 +284,6 @@ static void restore_slot(struct rescue_slot *s)
 	s->n_saved = 0;
 }
 
-void tawcroot_rescue_restore(void)
-{
-	struct rescue_slot *s = slot_find();
-	if (s) restore_slot(s);
-}
 
 /* Widen every recorded route. Returns 1 when the caller should retry.
  *
@@ -360,6 +354,10 @@ long tawcroot_dispatch_call(const tawcroot_syscall_args *args, ucontext_t *uc)
 	 * fchmodat/fchownat fakes), and every other trap avoids the
 	 * identity seqlock read. */
 	if (rv != TAWC_EACCES || tawcroot_identity_euid() != 0) return rv;
+	/* exec re-runs would repeat the terminal re-exec; its guest-path
+	 * opens are rescued individually (tawcroot_rescue_open_in_view). */
+	if (args->nr == TAWC_SYS_execve || args->nr == TAWC_SYS_execveat)
+		return rv;
 
 	int idx = slot_claim(current_tid());
 	if (idx < 0) return rv;

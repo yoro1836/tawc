@@ -276,16 +276,17 @@ path must not pay proot's per-syscall stat walk.
   that dropped privileges gets the real EACCES, matching the
   fchmodat/fchownat gating below — and every other trap avoids the
   identity seqlock read.
-- **Handlers that never return to the wrapper** must restore first.
-  `exit(2)` is not trapped (the guest may have unmapped its stack);
-  execve/execveat call
-  `tawcroot_rescue_restore()` before `tawcroot_exec_handler_commit()`,
-  which `execveat`s away. `--exec-child` then re-opens the guest
-  binary (and its PT_INTERP / shebang interpreters) **by path** in a
-  fresh process, outside any dispatch wrapper, so `loader_exec.c` uses
-  `tawcroot_rescue_open_in_view()` — without it a `--x--x--x` binary
-  (a 4111 sudo) that `handle_execve` just rescued would fail again on
-  the far side of the re-exec.
+- **Recording is lazy.** The first run records nothing; only an
+  EACCES at virtual root claims a slot and re-runs the handler once to
+  record routes, then widens and retries.
+- **exec is never retried by the wrapper**: a retry would repeat the
+  terminal re-exec. `exit(2)` is not trapped (the guest may have
+  unmapped its stack). Instead `handle_execve`'s probe and shebang
+  opens, and the `--exec-child` loader's PT_INTERP / interpreter
+  re-opens, use `tawcroot_rescue_open_in_view()`, which widens,
+  opens and restores around one open. The fd keeps its access, so a
+  `--x--x--x` binary (a 4111 sudo) loads through its pinned fd on the
+  far side of the re-exec.
 - **Re-running a handler that hit EACCES partway is safe.** The
   link-store mutations are the only multi-syscall ones; every error
   path in `linkstore.c` clears the intent slot and unlocks before

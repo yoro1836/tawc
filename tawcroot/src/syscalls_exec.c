@@ -29,7 +29,6 @@
 #include "loader_map.h"
 #include "path.h"
 #include "raw_sys.h"
-#include "rescue.h"
 #include "syscalls_exec.h"
 #include "tawc_string.h"
 #include "tawc_uapi.h"
@@ -255,11 +254,6 @@ static long handle_execve(const tawcroot_syscall_args *args, ucontext_t *uc)
 	                 (char *const *)args->c);
 	tawc_munmap(scratch, sizeof *scratch);
 	if (r < 0) return r;
-	/* commit() returns only on failure; on success it execveats away —
-	 * past the rescue wrapper, which would then never put back a mode
-	 * it widened to get the binary open (a 4111 sudo). Restore first;
-	 * no-op when nothing was widened. */
-	tawcroot_rescue_restore();
 	return tawcroot_exec_handler_commit((int)r);
 }
 
@@ -330,8 +324,6 @@ static long handle_execveat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	long r = do_execveat(scratch, args);
 	tawc_munmap(scratch, sizeof *scratch);
 	if (r < 0) return r;
-	/* See handle_execve. */
-	tawcroot_rescue_restore();
 	return tawcroot_exec_handler_commit((int)r);
 }
 

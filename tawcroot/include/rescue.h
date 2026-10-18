@@ -46,17 +46,11 @@ long tawcroot_dispatch_call(const tawcroot_syscall_args *args,
 void tawcroot_rescue_note(int base_fd, const char *path);
 
 /* tawcroot_open_in_view() with the same lazy DAC override around it,
- * for callers outside the dispatch wrapper — the --exec-child loader,
- * which re-opens the guest binary (and its PT_INTERP / shebang
- * interpreters) by path in a fresh process. Without it a `--x--x--x`
- * binary that handle_execve just rescued would fail again on the far
- * side of the re-exec. Passes straight through when the caller already
- * holds a slot. */
+ * restored before returning. For exec, which the dispatch wrapper does
+ * not retry (a retry would repeat the terminal re-exec): handle_execve's
+ * probe and shebang opens, and the --exec-child loader, which re-opens
+ * PT_INTERP / shebang interpreters by path in a fresh process. The
+ * opened fd keeps its access after the modes go back, so a `--x--x--x`
+ * binary opened here loads through its pinned fd. Passes straight
+ * through when the caller already holds a slot. */
 long tawcroot_rescue_open_in_view(const char *guest_path);
-
-/* Restore any modes widened for the in-flight syscall, now. Handlers
- * that hand control away without returning to the wrapper must call
- * this first — today that is execve/execveat, whose commit step
- * execveat()s and never comes back. Idempotent; a no-op when nothing
- * was widened. */
-void tawcroot_rescue_restore(void);
