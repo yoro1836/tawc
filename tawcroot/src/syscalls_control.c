@@ -25,6 +25,7 @@
 #include "path.h"
 
 #include "dispatch.h"
+#include "fastpath.h"
 #include "errno_neg.h"
 #include "raw_sys.h"
 #include "signal_shadow.h"
@@ -178,8 +179,10 @@ static long handle_rt_sigaction(const tawcroot_syscall_args *args,
 			action[3] &= ~SIGSYS_BIT;
 			act = action;
 		}
-		return TAWC_RAW(TAWC_SYS_rt_sigaction, args->a, (long)act,
-				args->c, args->d, 0, 0);
+		long rv = TAWC_RAW(TAWC_SYS_rt_sigaction, args->a, (long)act,
+				   args->c, args->d, 0, 0);
+		if (rv == 0 && act) tawcroot_fastpath_note_handler(action[0]);
+		return rv;
 	}
 
 	if (sigsetsize != 8) return TAWC_EINVAL;

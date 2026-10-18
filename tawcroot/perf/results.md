@@ -518,3 +518,21 @@ find and tar mostly take the dirfd leaf shortcut, which skips the
 orchestrator. Instruction counts repeat to ~0.01% between runs, which
 makes them the better gate for small user-space changes on a busy or
 dozing phone.
+
+## 2026-10-19 fastpath: mask signals only once a handler exists
+
+`TAWCROOT_FASTPATH=1` builds, `run-macro-shell.sh --rounds 5 --runs 9
+--cpu 9`, always-mask vs mask-after-first-handler (stable rounds):
+
+| Workload | Always mask | Conditional | Ratio |
+| --- | ---: | ---: | ---: |
+| `stat_many` | 176 ms | 158 ms | 0.90 |
+| `tar_usr_share` | 1,086 ms | 995 ms | 0.92 |
+| `find_usr` | 138 ms | 128 ms | 0.93 |
+| `ls_lR_usr_lib` | 345 ms | 320 ms | 0.93 |
+| `grep_tree` | 922 ms | 916 ms | 0.99 |
+
+The same session's default-build vs always-mask run was noisy (two fast
+rounds per side); its fastest-run ratios were 0.88–0.96. Combined, the
+fastpath build is roughly 0.82–0.88 of the default build on these
+workloads.

@@ -68,6 +68,7 @@ struct fp_region {
 };
 
 static struct fp_site   g_sites[FP_SITES];
+static int              g_caught;   /* a guest handler was ever installed */
 static struct fp_region g_regions[FP_REGIONS];
 static int              g_lock;
 
@@ -308,6 +309,12 @@ void tawcroot_fastpath_note(const tawcroot_syscall_args *args, ucontext_t *uc)
 	__atomic_store_n(&g_lock, 0, __ATOMIC_RELEASE);
 }
 
+void tawcroot_fastpath_note_handler(unsigned long handler)
+{
+	if (handler > 1 /* not SIG_DFL/SIG_IGN */)
+		__atomic_store_n(&g_caught, 1, __ATOMIC_RELAXED);
+}
+
 /* Called by tawcroot_fast_common with the guest's x0..x5 and x8. */
 long tawcroot_fast_entry(long a, long b, long c, long d, long e, long f,
 			 long nr);
@@ -316,8 +323,10 @@ long tawcroot_fast_entry(long a, long b, long c, long d, long e, long f,
 {
 #if TAWCROOT_FASTPATH == 1
 	uint64_t all = ~((uint64_t)1 << (SIGSYS - 1)), old;
-	TAWC_RAW(TAWC_SYS_rt_sigprocmask, SIG_SETMASK, (long)&all, (long)&old,
-		 8, 0, 0);
+	int mask = __atomic_load_n(&g_caught, __ATOMIC_RELAXED);
+	if (mask)
+		TAWC_RAW(TAWC_SYS_rt_sigprocmask, SIG_SETMASK, (long)&all,
+			 (long)&old, 8, 0, 0);
 #endif
 	tawcroot_syscall_args args = {
 		.nr = nr, .a = a, .b = b, .c = c, .d = d, .e = e, .f = f,
@@ -325,7 +334,9 @@ long tawcroot_fast_entry(long a, long b, long c, long d, long e, long f,
 	long rv = tawcroot_fs_sync();
 	if (!rv) rv = tawcroot_dispatch_call(&args, NULL);
 #if TAWCROOT_FASTPATH == 1
-	TAWC_RAW(TAWC_SYS_rt_sigprocmask, SIG_SETMASK, (long)&old, 0, 8, 0, 0);
+	if (mask)
+		TAWC_RAW(TAWC_SYS_rt_sigprocmask, SIG_SETMASK, (long)&old, 0, 8,
+			 0, 0);
 #endif
 	return rv;
 }
