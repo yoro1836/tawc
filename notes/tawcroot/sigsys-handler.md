@@ -326,14 +326,14 @@ Consequences:
   security boundary (§"What it explicitly is not"), and the guest
   can read `/proc/self/maps` to find our address anyway.
 
-Future: `PR_SET_SYSCALL_USER_DISPATCH` (kernel 5.11+) defines
-a *range* of instruction pointers from which syscalls are always
-allowed, operating at the syscall entry layer (separate from
-seccomp). It is not subject to the stacked-filter precedence
-problem. If we ever want to re-enable PIE (e.g. for ASLR hardening),
-probe for dispatch at init and fall back to BPF IP-check on older
-kernels. gVisor uses dispatch on 5.11+ and seccomp on older
-kernels. Our device has kernel 5.4, so this is future work.
+`PR_SET_SYSCALL_USER_DISPATCH` defines an always-allowed IP range
+separately from seccomp, but Linux 5.11 introduced it on x86.
+Linux 6.1 ARM64 lacks that support, so a newer kernel version alone
+does not make it available on the S24. It still uses SIGSYS and its
+settings do not survive fork/clone/exec. See the
+[manual](https://man7.org/linux/man-pages/man2/PR_SET_SYSCALL_USER_DISPATCH.2const.html)
+and [technique survey](execution-techniques.md); it is not a current
+ARM64 alternative to the fixed-address BPF path.
 
 ### Threading and `vfork` invariants
 

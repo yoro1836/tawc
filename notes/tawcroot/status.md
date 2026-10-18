@@ -537,22 +537,31 @@ backed by a very large profiled win.
 
 Considered and rejected — don't re-propose without new evidence:
 
-- **`PR_SET_SYSCALL_USER_DISPATCH` (kernel 5.11+)** as a seccomp-BPF
-  replacement: a whole parallel trapping path for a modest win —
-  per-syscall BPF evaluation is cheap next to SIGSYS delivery on
-  trapped calls. (Would also have let newer kernels drop the non-PIE
-  requirement.)
+- **`PR_SET_SYSCALL_USER_DISPATCH`** as a seccomp-BPF replacement:
+  Linux 5.11 introduced it on x86; Linux 6.1 ARM64 lacks support.
+  It also retains SIGSYS delivery overhead and requires re-enabling
+  after fork/clone/exec. It is not a current S24 optimization; see
+  [execution-techniques.md](execution-techniques.md).
 - **Carrying bind/root/store fds across the internal exec** (reopening
   them in `--exec-child` is ~4 syscalls per bind): built and tested
   (non-CLOEXEC reserved anchors, exec-state v11); host strace of the
   child went 167 → 129 syscalls with 10 binds, but a pinned, interleaved
   A/B on a Galaxy S24 (3 rounds × 7 runs, `perf/macro.sh`) showed no
   wall-time change (spawn ×1.05, bash start ×0.96, rest ±4%). The
-  guest exec overhead (~430 µs over a bare fork+exec, static `tiny`) is
-  not syscall count: a kernel exec of libtawcroot costs the same as
-  exec of a tiny binary, so the rest is loader mapping, page faults and
-  handler work. Not worth the extra fd/state surface; profile the
-  loader before trying again.
+  lower syscall count did not translate into lower elapsed time.
+  The extra fd/state surface was rejected. Later stage measurements
+  are recorded in [exec-performance.md](exec-performance.md).
+- **Compact argv/env exec-state offsets:** replacing fixed offset
+  arrays with sequence starts shrank the header from 22,412 to 1,940
+  bytes and removed about five minor faults per spawn. On the S24,
+  matching NDK 27.2 builds improved the shell spawn median by only
+  0.84%, with results depending on run order; the app comparison did
+  not establish a useful gain. Reverted; wire version 10 remains.
+  See [the measured results](../../tawcroot/perf/results.md#compact-exec-state-experiment-rejected).
+- **Shared per-exec arena** (collect argv/env straight into the final
+  state mapping): −1.1% shell spawn median on the S24 for ~700 changed
+  lines; rejected. See
+  [the measured results](../../tawcroot/perf/results.md#2026-10-18-shared-exec-arena-experiment-rejected).
 - **`openat2(RESOLVE_IN_ROOT)` (kernel 5.6+) resolver fast path**:
   tried and reverted — it re-roots cross-bind absolute symlink
   targets at the bind src dirfd (broke `/system/lib64` → `/apex`

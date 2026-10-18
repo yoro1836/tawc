@@ -118,6 +118,10 @@ F-Droid recipe — see "F-Droid buildserver rig" below. Skip for ordinary
 dev builds. Release signing also needs build-tools 35 or newer, for
 `apksigner --alignment-preserved`.
 
+`tawcroot/perf/repack-runtime-apk.sh` also uses SDK build-tools 35+
+(`aapt`, `zipalign`, `apksigner`) and the existing Android debug keystore
+to replace only the runtime in a dev APK for controlled A/B measurements.
+
 ### aarch64 glibc cross-toolchain (libhybris)
 
 | Distro | Packages |
@@ -131,6 +135,12 @@ NDK for libhybris because libhybris is glibc-side by design (its
 `hooks.c` exports glibc-shaped symbols and is loaded by glibc Wayland
 clients inside the chroot — see `notes/gpu-strategy.md`). The NDK
 targets bionic and is the wrong toolchain.
+
+The optional `tawcroot/perf/run-exec-cost.sh` and `run-rewrite-probe.sh`
+probes need this compiler's
+static libc too (`libc6-dev-arm64-cross` on Debian/Ubuntu). Runtime A/B
+builds should set `ANDROID_NDK_HOME` to the same app-pinned NDK on both
+sides; standalone `tawcroot/build.sh` otherwise selects the newest installed NDK.
 
 For the rest of our native build (the Rust compositor, libxkbcommon),
 the NDK is correct and we keep using it.

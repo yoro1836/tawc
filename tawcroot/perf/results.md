@@ -130,3 +130,185 @@ fork+exec of `true`, 2.5 ms per bash) did not move: the exec path is
 now the largest unchanged cost. One unpinned `find_usr` run took 323 s
 (median of its 5 runs was normal); not reproduced in 30 + 6 further
 runs, cause unknown.
+
+## 2026-10-18 exec cost attribution, S24
+
+`run-exec-cost.sh`, CPU 9, 4 KiB pages, SM-S921N, kernel
+6.1.162-android14-11. Native and tawcroot ran as adb shell against the
+same minimal rootfs and static glibc probe; the exec target only calls
+`exit_group`, without libc startup. Five rounds × 1,000 operations,
+five warm-ups per operation. Runtime: `bb332e1`, initially built with
+NDK 29. These are overhead measurements, not a before/after gain.
+Raw: `exec-cost-baseline-20261018.tsv` under `build/tawcroot-perf/`.
+
+| Operation | Native median | tawcroot median |
+| --- | ---: | ---: |
+| libc fork + wait | 585.8 µs | 636.4 µs |
+| raw fork + wait | 545.8 µs | 621.3 µs |
+| fork + exec + wait | 1,135.3 µs | 1,724.9 µs |
+| Child minor faults per spawn | 14.8 | 96.2 |
+
+The spawn gap is 589.6 µs; subtracting the fork gap leaves roughly
+539 µs as an investigation guide, not a causal decomposition. A separate
+app-domain baseline with the installed NDK 27.2 runtime measured
+1,701.0 µs/spawn (three rounds × 1,000); do not subtract shell-domain
+native times from it. Raw: `exec-cost-app-baseline-20261018.txt`.
+
+Isolated guest probes measured a 24 KiB state copy at 38.1 µs versus
+31.8 µs for a shared mapping, only a 6.3 µs difference. Anonymous first
+writes took 2.22 µs/page and COW writes 4.26 µs/page. Cached-file refaults
+took 0.216 µs/page with 0.126 minor faults/page. These access patterns
+cannot be reduced to a single price per minor fault. Native raw-fork
+medians with low fds / fd 1000 / fd 1024 were 546.9 / 553.6 / 552.4 µs
+(five rounds × 1,000); this did not identify a large high-fd penalty.
+Raw: `exec-cost-fd-20261018.txt`.
+
+### Separate stage profile
+
+`build-exec-profile.py` instrumented a copied source tree, not the
+production runtime. NDK 29, CPU 9, five warm-ups plus 50 measured child
+execs. Markers cross re-exec through the copied state's shared mapping;
+formatting happens after the final marker. Medians of individual stage
+differences below do not necessarily add to the median total.
+Raw: `exec-stages-baseline-20261018.txt`.
+
+| Interval | Median |
+| --- | ---: |
+| Handler entry → internal exec | 222.8 µs |
+| argv/env collection | 49.1 µs |
+| ELF probe | 29.3 µs |
+| Supervisor state snapshot | 30.7 µs |
+| State serialization/write | 50.7 µs |
+| Commit preparation | 25.0 µs |
+| Internal exec → new runtime main | 609.1 µs |
+| New runtime main → guest jump | 189.3 µs |
+| Main → parsed state | 29.7 µs |
+| Supervisor reconstruction | 106.2 µs |
+| Restore exec state | 11.5 µs |
+| ELF parse / map | 5.3 / 14.5 µs |
+| Stack reserve / build | 6.1 / 11.9 µs |
+
+The internal-exec interval includes startup before `main`; it is not
+pure kernel time. The instrumented state layout, mappings and clock
+calls also change costs. Use these intervals to locate work, then test
+changes with normal binaries. CPU-wide `/proc/stat` deltas cannot
+attribute kernel time to this process, and the probe's user/system CPU
+split was too coarse to resolve these short child lifetimes reliably.
+
+### Compact exec-state experiment: rejected
+
+The candidate replaced fixed argv/env offset arrays with string-sequence
+start offsets and existing counts. Header size fell from 22,412 to
+1,940 bytes (experimental wire version 11). The acceptance condition was
+a consistent roughly 2–3% or greater speedup, fewer faults and passing
+correctness checks.
+
+Both uninstrumented binaries used app-pinned NDK 27.2.12479018. The
+baseline SHA-256 matches the installed dev runtime:
+`3339bf55a58710c5e798642c4e8b305cdde33248d7852c2f0f868d38f337ed69`.
+Candidate:
+`54b39c2ea679029c26413d4ec34c7917ec0413b9ca723f182fa7a54e62190a67`.
+Six rounds × 1,000 operations, CPU 9, native/baseline/candidate order
+reversed on alternating rounds. Raw: `exec-cost-compact-ab-20261018.tsv`.
+
+| Shell-domain metric | Baseline | Candidate |
+| --- | ---: | ---: |
+| Spawn median | 1,739.1 µs | 1,724.5 µs |
+| Child minor faults per spawn | 100.23 | 95.22 |
+| libc fork + wait | 637.1 µs | 639.2 µs |
+| raw fork + wait | 612.9 µs | 611.6 µs |
+
+Median spawn time improved only 0.84%. Paired round improvements ranged
+from −1.64% to +9.47%; the median was −1.25% when the candidate ran later
+and +3.09% when it ran first. About five fewer minor faults consistently
+survived, but a consistent wall-time gain did not.
+
+The app A/B replaced only `lib/arm64-v8a/libtawcroot.so` in the same
+signed dev APK. CPU 9, four baseline/candidate pairs, alternating order,
+nine measured runs plus a warm-up per workload. The first macro sample
+also showed no useful gain (`true` 165 → 164 ms; bash 177.5 → 187.5 ms).
+Review then found that the old harness ignored workload failures.
+After adding failure/row validation and replacing `seq` spawn loops
+with Bash arithmetic loops, all four pairs were repeated successfully:
+
+| App workload | Baseline median | Candidate median | Candidate/baseline |
+| --- | ---: | ---: | ---: |
+| `spawn_true_x100` | 161 ms | 164 ms | 1.019 |
+| `bash_startup_x50` | 172.5 ms | 173 ms | 1.003 |
+| `stat_many` (control) | 57 ms | 54.5 ms | 0.956 |
+
+These are medians of the four per-round medians. Spawn pair changes
+ranged from 1.28% faster to 3.75% slower; bash baseline medians ranged
+from 121 to 176 ms. The app run confirms no consistent process-launch
+gain. Raw: `compact-app-strict-{baseline,candidate}-{1..4}.tsv` and
+`compact-app-strict-20261018.log`. The script restored the original APK
+afterwards. The compact production change was rejected and reverted;
+probe tools and corrected test fixtures remain.
+
+Full candidate correctness runs reproduced baseline's existing failures:
+host 2,215 passed / 13 failed; device 1,691 passed / 10 failed (the
+candidate added five tests). The failures concern stale guest seccomp
+smoke expectations; see
+[the issue](../../issues/tawcroot-guest-filter-smoke-expectations.md).
+After reverting the candidate, all 19 exec-state tests pass on host and
+device. Four malformed-state tests now start from a successfully written
+state instead of an undersized buffer, and the capacity test exercises
+the actual argv/env limits. Production retains wire version 10.
+
+## 2026-10-18 ARM64 rewriting feasibility, S24
+
+`run-rewrite-probe.sh --cpu 9 --iterations 200000 --rounds 7`, same
+Galaxy S24 and baseline runtime SHA-256 `3339bf55…`. App execution was
+through the installed Arch distro, with Android context
+`u:r:untrusted_app_34:…`; native execution used `u:r:shell:s0`.
+Raw log: `build/tawcroot-perf/rewrite-probe-s24-20261018.log`.
+
+Both contexts passed near trampoline allocation (about 1 MiB from the
+site), anonymous RW→RX, file-code RX→RWX→RX, instruction-cache flushes,
+GPR/x30/SP/NZCV checks, four threads × 10,000 executions after patching,
+and restoration of the original SVC. This confirms the basic technique
+works in the S24 app context, not just adb shell.
+
+| Controlled loop | Native median | App/tawcroot median |
+| --- | ---: | ---: |
+| Constant-return assembly call | 0.719 ns | 0.720 ns |
+| Original getuid SVC | 149.656 ns | 1,002.263 ns |
+| Patched fixed-return branch | 1.437 ns | 1.438 ns |
+
+The patched path returns a marker instead of calling a real dispatcher or
+the kernel. These are different operations; this table is **not a TAWC
+speedup comparison**. Real path translation, argument checks, context
+management and patch setup cost remain unmeasured. Concurrent publication,
+late library/JIT mappings and FP/SIMD handling also remain untested.
+The probe restored its code and the runner removed its device copies.
+
+## 2026-10-18 shared exec arena experiment (rejected)
+
+Candidate: argv/env collected straight into the final `MAP_SHARED`
+state mapping, metadata appended in place, one mapping from collection
+to commit (no intermediate copy or re-serialization). Same NDK 27.2 for
+both builds (baseline runtime SHA-256 `3339bf55…`, candidate
+`e749e0cc…`), `run-exec-cost.sh --rounds 8 --iterations 1500 --cpu 9`,
+shell domain, interleaved order. Patch kept outside the tree at
+`build/tawcroot-perf/exec-arena-rejected.patch`.
+
+| Round | Baseline spawn | Arena spawn | Change |
+| ---: | ---: | ---: | ---: |
+| 1 | 1,719.9 µs | 1,702.8 µs | −1.0% |
+| 2 | 1,715.7 µs | 1,715.4 µs | −0.0% |
+| 3 | 1,719.4 µs | 1,700.1 µs | −1.1% |
+| 4 | 1,786.0 µs | 1,672.6 µs | −6.4% |
+| 5 | 1,734.4 µs | 1,731.9 µs | −0.1% |
+| 6 | 1,709.8 µs | 1,705.0 µs | −0.3% |
+| 7 | 1,727.7 µs | 1,659.7 µs | −3.9% |
+| 8 | 1,726.6 µs | 1,715.7 µs | −0.6% |
+
+Never slower, but the typical round moved under 1% (overall medians
+1,723.2 → 1,703.9 µs, −1.1%), the same order as the rejected compact
+state. ~700 changed lines in the exec path are not justified by it.
+
+Its tests surfaced a real interaction instead: with lazy rescue
+recording, an `EACCES` from execve's terminal re-exec re-ran the whole
+handler twice more. exec is now excluded from the dispatch-level rescue
+and its guest-path opens rescue individually (see
+notes/tawcroot/path-translation.md §"DAC override").

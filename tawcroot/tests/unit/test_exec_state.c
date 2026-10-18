@@ -170,8 +170,8 @@ test(exec_state_rejects_bad_magic)
 {
 	const char *argv[] = { "p", NULL };
 	const char *envp[] = { NULL };
-	uint8_t buf[256];
-	tawcroot_exec_state_write(buf, sizeof buf, "/p", 1, argv, envp, NULL);
+	uint8_t buf[sizeof(tawcroot_exec_state_header) + 64];
+	test_true(tawcroot_exec_state_write(buf, sizeof buf, "/p", 1, argv, envp, NULL) > 0);
 
 	tawcroot_exec_state_header *h = (tawcroot_exec_state_header *)buf;
 	h->magic = 0xdeadbeef;
@@ -187,8 +187,8 @@ test(exec_state_rejects_bad_version)
 {
 	const char *argv[] = { "p", NULL };
 	const char *envp[] = { NULL };
-	uint8_t buf[256];
-	tawcroot_exec_state_write(buf, sizeof buf, "/p", 1, argv, envp, NULL);
+	uint8_t buf[sizeof(tawcroot_exec_state_header) + 64];
+	test_true(tawcroot_exec_state_write(buf, sizeof buf, "/p", 1, argv, envp, NULL) > 0);
 	((tawcroot_exec_state_header *)buf)->version = 99;
 	const char *abuf[TAWCROOT_EXEC_STATE_MAX_ARGS + 1];
 	const char *ebuf[TAWCROOT_EXEC_STATE_MAX_ENV + 1];
@@ -201,8 +201,9 @@ test(exec_state_rejects_truncated_strings)
 {
 	const char *argv[] = { "p", NULL };
 	const char *envp[] = { NULL };
-	uint8_t buf[256];
+	uint8_t buf[sizeof(tawcroot_exec_state_header) + 64];
 	long w = tawcroot_exec_state_write(buf, sizeof buf, "/p", 1, argv, envp, NULL);
+	test_true(w > 0);
 
 	/* Truncate to just the header. Reader should refuse — claimed
 	 * string_bytes won't fit. */
@@ -220,8 +221,8 @@ test(exec_state_rejects_offset_past_strings)
 {
 	const char *argv[] = { "p", NULL };
 	const char *envp[] = { NULL };
-	uint8_t buf[256];
-	tawcroot_exec_state_write(buf, sizeof buf, "/p", 1, argv, envp, NULL);
+	uint8_t buf[sizeof(tawcroot_exec_state_header) + 64];
+	test_true(tawcroot_exec_state_write(buf, sizeof buf, "/p", 1, argv, envp, NULL) > 0);
 	tawcroot_exec_state_header *h = (tawcroot_exec_state_header *)buf;
 	h->path_off = h->string_bytes + 100;
 	const char *abuf[TAWCROOT_EXEC_STATE_MAX_ARGS + 1];
@@ -402,7 +403,7 @@ test(exec_state_with_many_args_and_env)
  * near-cap argv + a large env and confirm it round-trips. */
 test(exec_state_near_cap_args_roundtrip)
 {
-	enum { NA = 2000, NE = 500 };
+	enum { NA = TAWCROOT_EXEC_STATE_MAX_ARGS, NE = TAWCROOT_EXEC_STATE_MAX_ENV };
 	static const char *argv[NA + 1];
 	static const char *envp[NE + 1];
 	for (int i = 0; i < NA; i++) argv[i] = "globbed-filename-12345.txt";

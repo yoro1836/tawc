@@ -60,6 +60,75 @@ traps for apps (e.g. `openat2` on 16+) still work here; confirm
 anything policy-sensitive in the app. The bench needs a static-capable
 `aarch64-linux-gnu-gcc` (or `--cc` / `--bench-bin`).
 
+### Exec cost investigation
+
+Separate fork from exec before attributing process-launch overhead:
+
+```sh
+TAWC_TARGET=physical tawcroot/perf/run-exec-cost.sh --rounds 5 --cpu 9
+```
+
+This compares native and tawcroot in the shell domain using the same
+static glibc probe and a guest with no libc startup. It records wall
+time, parent/child CPU time and actual minor/major fault deltas. The
+kernel probes cover mappings, memfd state transfer and page faults.
+`--cpu` takes a CPU list; the runner converts it to Android's hex mask.
+Raw TSVs and the runtime hash are saved under `build/tawcroot-perf/`.
+Use `--tawcroot BASELINE --compare CANDIDATE` for an interleaved comparison.
+App-domain performance still needs a separate broker/real-workload A/B.
+Build both runtimes with the same `ANDROID_NDK_HOME`; use the app's
+pinned NDK when comparing against an APK.
+
+For internal exec stages, `python3 tawcroot/perf/build-exec-profile.py`
+builds an isolated instrumented copy under `build/tawcroot-perf/` using
+the NDK flags from `build.sh`. It does not stage into the APK. Launch
+the resulting runtime directly from the shell; its fixed syscall-stub
+address belongs to that binary. Each successful load prints one
+`TAWC_EXEC_PROFILE` row before entering the guest. `kind=child` rows
+contain pre/post absolute monotonic timestamps across the re-exec.
+Output formatting occurs after `post.jump`; use stage differences for
+attribution and the normal binary for performance comparisons.
+
+The profiler extends the copied exec-state header and transports markers
+through a shared mapping. Its overhead prevents treating the instrumented
+spawn time as the production baseline. Minor faults also include demand
+zero, cached-file faults and COW; file fault-around means touched pages
+and fault counts differ. CPU-wide `/proc/stat` changes cannot identify a
+particular process's kernel time.
+
+For app A/B without rebuilding unrelated APK components, use
+`repack-runtime-apk.sh DEV_APK ARM64_RUNTIME OUTPUT_APK`. It changes one
+runtime entry, aligns/signs the APK, and checks the original debug
+certificate. Use the same input APK for both builds. `macro.sh --cpu 9
+--workloads spawn_true_x100,bash_startup_x50,stat_many` narrows the real-app
+comparison to process launch and a filesystem control.
+Workload failures or missing timing rows make the macro run fail before
+writing a result file.
+
+### ARM64 rewriting feasibility
+
+```sh
+TAWC_TARGET=physical tawcroot/perf/run-rewrite-probe.sh --cpu 9
+```
+
+This builds a static probe and runs the same binary in the native shell
+and the installed distro through the app broker. It records the app
+SELinux context and installed runtime hash, and cleans both scratch
+copies. Select the install with `TAWC_INSTALL_ID` if needed.
+
+The probe patches one controlled `getuid` SVC to a nearby fixed-return
+trampoline. It checks RX/RWX transitions, instruction-cache flushes,
+GPR/SP/NZCV preservation, execution by four threads after patching, and
+restoring the original instruction. Patching occurs before thread creation;
+concurrent patch publication and FP/SIMD context are outside this probe.
+Exit 77 means unavailable, 1 means a failed check, and 0 means success.
+
+`patched_fixed_return` measures a tiny branch sequence, not real TAWC
+dispatch, argument validation or path translation. Its timing cannot be
+reported as an application speedup. This uses the same optional static
+aarch64 glibc toolchain as the exec-cost probe; no production dependency
+or runtime patching is enabled.
+
 ## Local competitor tools
 
 These tools are only for local perf runs. Do not add them to the normal

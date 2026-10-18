@@ -47,6 +47,8 @@ This design + implementation note is split across:
 - [bootstrap-and-modules.md](bootstrap-and-modules.md) — bootstrap & entry, module layout.
 - [build-and-install.md](build-and-install.md) — build integration and installer integration.
 - [testing.md](testing.md) — testing strategy and layers.
+- [exec-performance.md](exec-performance.md) — exec cost attribution, measurement constraints, and rejected experiments.
+- [execution-techniques.md](execution-techniques.md) — alternative interception and launch techniques, with feasibility limits.
 - [phasing.md](phasing.md) — phased implementation plan and history.
 - [status.md](status.md) — known gaps before MVP, accepted syscall-fidelity divergences, future work, confirmed environment, maintenance contract.
 
