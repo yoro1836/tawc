@@ -542,6 +542,17 @@ Considered and rejected — don't re-propose without new evidence:
   per-syscall BPF evaluation is cheap next to SIGSYS delivery on
   trapped calls. (Would also have let newer kernels drop the non-PIE
   requirement.)
+- **Carrying bind/root/store fds across the internal exec** (reopening
+  them in `--exec-child` is ~4 syscalls per bind): built and tested
+  (non-CLOEXEC reserved anchors, exec-state v11); host strace of the
+  child went 167 → 129 syscalls with 10 binds, but a pinned, interleaved
+  A/B on a Galaxy S24 (3 rounds × 7 runs, `perf/macro.sh`) showed no
+  wall-time change (spawn ×1.05, bash start ×0.96, rest ±4%). The
+  guest exec overhead (~430 µs over a bare fork+exec, static `tiny`) is
+  not syscall count: a kernel exec of libtawcroot costs the same as
+  exec of a tiny binary, so the rest is loader mapping, page faults and
+  handler work. Not worth the extra fd/state surface; profile the
+  loader before trying again.
 - **`openat2(RESOLVE_IN_ROOT)` (kernel 5.6+) resolver fast path**:
   tried and reverted — it re-roots cross-bind absolute symlink
   targets at the bind src dirfd (broke `/system/lib64` → `/apex`
