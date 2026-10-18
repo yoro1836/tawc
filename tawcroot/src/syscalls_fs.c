@@ -41,6 +41,7 @@
 #include "identity.h"
 #include "namespace.h"
 #include "io.h"
+#include "linkobjs.h"
 #include "linkstore.h"
 #include "path.h"
 #include "pathcache.h"
@@ -508,15 +509,18 @@ static void stat_fix_nlink_in_store(int fd, const char *path,
  * nlink 1 silently dissolves hardlink structure at archive time (tar
  * stored both names with full data). Cost gates: only S_ISREG/S_ISLNK
  * with kernel nlink 1 ON THE STORE'S OWN FILESYSTEM (objects cannot
- * live elsewhere — skips /system binds, memfds) while a store is open
- * pays one /proc/self/fd readlink; the sidecar read happens on actual
- * store hits only. Returns the count, or 0 for "not an object". */
+ * live elsewhere — skips /system binds, memfds) while a store is open,
+ * and that the object inode set (linkobjs.h) cannot rule out, pays one
+ * /proc/self/fd readlink; the sidecar read happens on actual store hits
+ * only. Returns the count, or 0 for "not an object". */
 static unsigned long fd_object_nlink(int fd, unsigned int mode,
-				     unsigned long nlink, unsigned long dev)
+				     unsigned long nlink, unsigned long dev,
+				     uint64_t ino)
 {
 	if (tawcroot_store_link_fd < 0) return 0;
 	if (nlink != 1 || dev != tawcroot_store_dev) return 0;
 	if (!S_ISREG(mode) && !S_ISLNK(mode)) return 0;
+	if (!tawcroot_linkobjs_maybe(ino)) return 0;
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
 	char *hostp = scratch->buf[0];
 	tawcroot_stats_event(TAWCROOT_EV_FSTAT_NLINK);
@@ -589,7 +593,8 @@ static long handle_newfstatat(const tawcroot_syscall_args *args,
 				if (pad >= 0) tawcroot_gamepad_stat(&local, pad);
 				unsigned long c = fd_object_nlink(
 					dirfd, local.st_mode, local.st_nlink,
-					(unsigned long)local.st_dev);
+					(unsigned long)local.st_dev,
+					(uint64_t)local.st_ino);
 				if (c) local.st_nlink =
 					(__typeof__(local.st_nlink))c;
 			}
@@ -743,8 +748,9 @@ static long translate_local(struct tawcroot_path_scratch *scratch, int slot,
 			 * was chased against the HOST root — e.g.
 			 * openat(etc_fd, "resolv.conf") with resolv.conf →
 			 * /run/resolv.conf landed on the host's /run.
-			 * Cost: one /proc/self/fd readlink per *at call with
-			 * a relative path and real dirfd.
+			 * Cost: one fstat per *at call with a relative path
+			 * and real dirfd once fdpath.h has the dirfd cached;
+			 * a /proc/self/fd readlink otherwise.
 			 *
 			 * The lift resolves via the dirfd's CURRENT path, so
 			 * a dirfd whose directory was renamed/unlinked after
@@ -1752,7 +1758,8 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 					dirfd, local.stx_mode,
 					local.stx_nlink,
 					TAWC_MKDEV(local.stx_dev_major,
-						   local.stx_dev_minor));
+						   local.stx_dev_minor),
+					(uint64_t)local.stx_ino);
 				if (c) {
 					local.stx_nlink = (unsigned int)c;
 					local.stx_mask |= STATX_NLINK;
@@ -1886,7 +1893,8 @@ static long handle_fstat(const tawcroot_syscall_args *args, ucontext_t *uc)
 		if (pad >= 0) tawcroot_gamepad_stat(&local, pad);
 		unsigned long c = fd_object_nlink(fd, local.st_mode,
 						  local.st_nlink,
-						  (unsigned long)local.st_dev);
+						  (unsigned long)local.st_dev,
+						  (uint64_t)local.st_ino);
 		if (c) local.st_nlink = (__typeof__(local.st_nlink))c;
 	}
 	return finish_stat(rv, &local, out);

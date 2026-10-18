@@ -14,6 +14,7 @@
 
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -1698,6 +1699,78 @@ test(linkstore_tmpfile_sweep_age_gated)
 			   AT_FDCWD, "/run/kept", AT_EMPTY_PATH, 0), 0);
 	test_int_eq(close((int)live), 0);
 
+	store_teardown();
+	th_teardown(&v);
+}
+/* ------------------------------------------------------------------ */
+/* Object inode set (linkobjs.h): fstat skips the /proc readlink only  */
+/* for inodes the set proves are not objects.                          */
+
+static long fstat_guest(TestCtx *test_ctx, int fd, struct stat *st)
+{
+	return th_sys(TAWC_SYS_fstat, fd, st, 0, 0, 0, 0);
+}
+
+test(linkstore_objset_fd_opened_before_link_reports_count)
+{
+	th_view v;
+	th_setup(&v, "ls-objset-pre");
+	store_setup(&v);
+	/* A first pair makes the store READY and the set populated, so the
+	 * second link must reach the set through link_new's own insert. */
+	write_file(test_ctx, "/run/seed", "s\n");
+	make_pair(test_ctx, "/run/seed", "/run/seed2");
+	write_file(test_ctx, "/run/f", "x\n");
+	write_file(test_ctx, "/run/plain", "y\n");
+	long fd = th_sys(TAWC_SYS_openat, AT_FDCWD, "/run/f", O_RDONLY, 0, 0, 0);
+	long pfd = th_sys(TAWC_SYS_openat, AT_FDCWD, "/run/plain", O_RDONLY, 0, 0, 0);
+	test_true(fd >= 0 && pfd >= 0);
+	struct stat st;
+	test_int_eq(fstat_guest(test_ctx, (int)fd, &st), 0);
+	test_int_eq((long)st.st_nlink, 1);
+	/* Linked while open: the fd opened earlier now refers to an object. */
+	make_pair(test_ctx, "/run/f", "/run/l");
+	test_int_eq(fstat_guest(test_ctx, (int)fd, &st), 0);
+	test_int_eq((long)st.st_nlink, 2);
+	test_int_eq(fstat_guest(test_ctx, (int)pfd, &st), 0);
+	test_int_eq((long)st.st_nlink, 1);
+	test_int_eq(close((int)fd), 0);
+	test_int_eq(close((int)pfd), 0);
+	store_teardown();
+	th_teardown(&v);
+}
+
+test(linkstore_objset_rescans_objects_made_before_it)
+{
+	th_view v;
+	th_setup(&v, "ls-objset-scan");
+	store_setup(&v);
+	write_file(test_ctx, "/run/f", "x\n");
+	make_pair(test_ctx, "/run/f", "/run/l");
+
+	/* A later session with no set file (objects from an older runtime,
+	 * or a copied store): the set must rescan link/. */
+	tawcroot_linkstore_configure(NULL);
+	DIR *d = opendir(g_store);
+	test_nonnull(d);
+	int removed = 0;
+	for (struct dirent *e; (e = readdir(d));) {
+		if (strncmp(e->d_name, "objcache-", 9) != 0) continue;
+		char p[4500];
+		snprintf(p, sizeof p, "%s/%s", g_store, e->d_name);
+		test_int_eq(unlink(p), 0);
+		removed++;
+	}
+	closedir(d);
+	test_int_eq(removed, 1);
+	tawcroot_linkstore_configure(g_store);
+
+	long fd = th_sys(TAWC_SYS_openat, AT_FDCWD, "/run/l", O_RDONLY, 0, 0, 0);
+	test_true(fd >= 0);
+	struct stat st;
+	test_int_eq(fstat_guest(test_ctx, (int)fd, &st), 0);
+	test_int_eq((long)st.st_nlink, 2);
+	test_int_eq(close((int)fd), 0);
 	store_teardown();
 	th_teardown(&v);
 }

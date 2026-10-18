@@ -14,6 +14,7 @@
 #include "errno_neg.h"
 #include "fdtab.h"
 #include "io.h"
+#include "linkobjs.h"
 #include "linkstore.h"
 #include "path.h"
 #include "path_scratch.h"
@@ -601,6 +602,8 @@ static long store_lock(void)
 	if (g_state == TAWCROOT_STORE_LATENT &&
 	    xexists(AT_FDCWD, tawcroot_store_host_path)) {
 		if (store_open(1) < 0) g_state = TAWCROOT_STORE_OFF;
+		/* A query made while LATENT gave up on the object set. */
+		else tawcroot_linkobjs_reset();
 	}
 	if (g_state != TAWCROOT_STORE_READY) {
 		mu_unlock();
@@ -738,6 +741,12 @@ static long store_open(int create)
 	return 0;
 }
 
+void tawcroot_linkstore_objs_init(void)
+{
+	if (g_state == TAWCROOT_STORE_READY)
+		tawcroot_linkobjs_init(g_store_fd, tawcroot_store_link_fd);
+}
+
 /* LATENT → READY on the first mutation that needs the store. */
 static long store_ensure(void)
 {
@@ -783,6 +792,7 @@ int tawcroot_linkstore_latent_upgrade(void)
 
 void tawcroot_linkstore_configure(const char *store_host_path)
 {
+	tawcroot_linkobjs_reset();
 	g_state = TAWCROOT_STORE_OFF;
 	g_store_fd = -1;
 	tawcroot_store_link_fd = -1;
@@ -1022,6 +1032,9 @@ long tawcroot_link_new(int sfd, const char *ssuf, int dfd, const char *dsuf)
 		      AT_SYMLINK_NOFOLLOW, 0, 0);
 	if (rv < 0) { store_unlock(); return rv; }
 
+	/* Before the rename makes it an object (linkobjs.h). */
+	tawcroot_linkobjs_add((uint64_t)st.st_ino);
+
 	char base[24];
 	char tok[TAWCROOT_LINK_TOKEN_MAX];
 	u64_to_dec((unsigned long)st.st_ino, base);
@@ -1232,6 +1245,7 @@ long tawcroot_link_publish_tmp(const char *name, int dfd, const char *dsuf)
 void tawcroot_linkstore_tmp_sweep(void)
 {
 	if (g_state != TAWCROOT_STORE_READY || g_tmp_fd < 0) return;
+	tawcroot_linkobjs_sweep(g_store_fd, tawcroot_store_link_fd);
 	long dfd = tawc_openat(g_tmp_fd, ".",
 			       O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
 	if (dfd < 0) return;

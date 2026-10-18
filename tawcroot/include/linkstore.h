@@ -209,3 +209,7 @@ long tawcroot_link_clobber(int ofd, const char *osuf,
  * slot is pending). Used by the kill-matrix harness; production calls
  * this from configure. Returns 0 or -errno. */
 long tawcroot_linkstore_recover_now(void);
+
+/* Map the object inode set (linkobjs.h) against the open store; a
+ * no-op unless the store is READY. Called lazily by linkobjs. */
+void tawcroot_linkstore_objs_init(void);

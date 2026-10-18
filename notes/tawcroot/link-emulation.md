@@ -150,8 +150,11 @@ form and keep behaving as plain symlinks; no migration.
   but GNU tar CREATE registers hardlinks from the fstat of the fd it
   opens, which silently dissolved hardlink structure at archive time
   (found in the stage-5 tar round-trip). Cost gate: only
-  S_ISREG/S_ISLNK fds with kernel nlink 1 while a store is open pay
-  one `/proc/self/fd` readlink.
+  S_ISREG/S_ISLNK fds with kernel nlink 1 on the store's filesystem,
+  whose inode the shared object set (`include/linkobjs.h`) cannot rule
+  out, pay one `/proc/self/fd` readlink. The set is filled by
+  `link_new` before its rename and by a one-time scan of `link/`, and
+  is named after `link/`'s inode so a copied store rebuilds it.
 - Non-O_EXCL O_TMPFILE: fstat nlink 1 (not 0); `/proc/self/fd` shows a
   live `tmp/` path (no " (deleted)").
 - Emulated names are never planted inside binds: the resolver

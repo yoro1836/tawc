@@ -339,3 +339,23 @@ Per spawned process (`true` loop): --exec-child init ≈ 220 µs — bind
 table rebuild 64 µs, guest binary open/map 33 µs, shm/link store/path
 cache 30 µs, ld.so map 27 µs, root fd/usercopy 21 µs, the rest ~40 µs;
 ~52 minor faults. Exec prepare in the parent ≈ 100 µs.
+
+## 2026-10-18 fd path cache + object inode set
+
+`/proc/self/fd` readlinks per workload (`trap-stats.py`, stats build):
+`tar` 23,242 → 1,774, `grep -r` 14,770 → 1,474, `find` 4,187 → 286.
+Dirfd lifts are now served by `fdpath.h` (one fstat to revalidate) and
+fstat's object probe is skipped for inodes `linkobjs.h` rules out.
+
+Production runtimes, `macro.sh --runs 7 --cpu 9`, 3 interleaved rounds,
+only libtawcroot swapped in the same dev APK; medians of round medians:
+
+| Workload | Before | After | After/before |
+| --- | ---: | ---: | ---: |
+| `tar_usr_share` | 202 ms | 168 ms | 0.83 |
+| `grep_tree` | 160 ms | 137 ms | 0.86 |
+| `find_usr` | 64 ms | 57 ms | 0.89 |
+| `stat_many` | 34 ms | 31 ms | 0.91 |
+| `ls_lR_usr_lib` | 32 ms | 32 ms | 1.00 |
+| `pacman_Qk` | 193 ms | 191 ms | 0.99 |
+| `spawn_true_x100` | 204 ms | 206 ms | 1.01 |
