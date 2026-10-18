@@ -2893,6 +2893,25 @@ static long capability_metadata(long result, const tawcroot_syscall_args *args)
 	return 0;
 }
 
+/* Host path for a translated xattr target. Under the root view, the
+ * root's own host path reaches it with ordinary dcache lookups; the
+ * /proc/self/fd/<n>/ form costs a procfs walk and a magic-link jump on
+ * every call (`ls -l` makes one per file). Binds and the empty suffix
+ * keep the /proc form. */
+static long xattr_host_path(char *out, size_t cap, int fd, const char *suffix)
+{
+	size_t rl = tawcroot_rootfs_host_path_len;
+	if (fd != tawcroot_rootfs_fd || rl == 0 || !suffix[0] ||
+	    tawcroot_rootfs_host_path[0] != '/')
+		return tawc_proc_fd_path(out, cap, fd, suffix);
+	size_t pos = 0;
+	long e = tawc_str_append(out, cap, &pos, tawcroot_rootfs_host_path);
+	if (!e && tawcroot_rootfs_host_path[rl - 1] != '/')
+		e = tawc_str_append(out, cap, &pos, "/");
+	if (!e) e = tawc_str_append(out, cap, &pos, suffix);
+	return e ? e : (long)pos;
+}
+
 #define DECLARE_PATH_XATTR(name, sysnr, narg, pmode, pintent)             \
 static long handle_##name(const tawcroot_syscall_args *args, ucontext_t *uc) \
 {                                                                          \
@@ -2907,9 +2926,8 @@ static long handle_##name(const tawcroot_syscall_args *args, ucontext_t *uc) \
 		return TAWC_EOPNOTSUPP; /* see big comment above */            \
 	}                                                                      \
 	char *host_path = scratch->buf[2];                                      \
-	long bp = tawc_proc_fd_path(host_path,                                  \
-				    TAWCROOT_PATH_SCRATCH_SIZE,               \
-				    t.fd, t.path);                             \
+	long bp = xattr_host_path(host_path, TAWCROOT_PATH_SCRATCH_SIZE,         \
+				  t.fd, t.path);                               \
 	if (bp < 0) return bp;                                             \
 	long result = TAWC_RAW(sysnr, (long)host_path,                            \
 			args->b, args->c, args->d,                         \

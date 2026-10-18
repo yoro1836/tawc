@@ -458,3 +458,28 @@ shortcut"). `run-macro-shell.sh --rounds 5 --runs 7 --cpu 9`:
 `ls -lR` names files relative to the cwd, not a dirfd, so it is
 unaffected; its largest cost is `llistxattr` (8.5 µs/trap, 30% of wall),
 routed through `/proc/self/fd/<rootfs>/…`.
+
+## 2026-10-19 fcntl filter leaf, xattr host path
+
+`fcntl` trapped on every call (12,488 traps in `find_usr`, mostly
+gnulib's `F_DUPFD_CLOEXEC`/`F_GETFD`), though the handler only acts on
+reserved fds and the emulated shm seal ops; the filter now traps only
+those, like `close`. Rootfs `*xattr` targets go to the kernel as the
+root's host path instead of `/proc/self/fd/<root>/…`.
+
+The phone was dozing (cpu9 capped at 1.63 GHz) and alternated fast and
+3× slow rounds, so `run-macro-shell.sh` now also reports the ratio of
+the fastest runs (5 rounds × 9 runs, both changes vs `bdfa524`):
+
+| Workload | Min ratio |
+| --- | ---: |
+| `find_usr` | 0.865 |
+| `stat_many` | 0.914 |
+| `grep_tree` | 0.958 |
+| `ls_lR_usr_lib` | 0.991 |
+| `tar_usr_share` | 1.003 |
+
+The xattr change alone, from `trap-stats.py --shell` on `ls_lR_usr_lib`
+alternating three times: `llistxattr` 8.18/8.25/9.08 → 7.48/7.23/7.35
+µs/trap, with `statx` steady at 6.0–6.1 µs as the control (about
+14 ms of a ~390 ms run).

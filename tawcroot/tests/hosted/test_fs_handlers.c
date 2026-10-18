@@ -10,7 +10,10 @@
 
 #include <fcntl.h>
 #include <string.h>
+#include <errno.h>
+#include <stdio.h>
 #include <sys/mman.h>
+#include <sys/xattr.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -610,5 +613,58 @@ test(hosted_stat_family_bad_out_pointer_efaults)
 	close((int)fd);
 	munmap(none, (size_t)page);
 	munmap(ro, (size_t)page);
+	th_teardown(&v);
+}
+
+/* Rootfs xattr targets go to the kernel as the root's host path rather
+ * than /proc/self/fd/<root>/...; results must match the host, a leaf
+ * symlink must not be followed by the l* variants, and a chroot must
+ * move the anchor. */
+static char last_xattr_path[4096];
+static bool note_xattr(long nr, const long args[6], long *ret)
+{
+	(void)ret;
+	if (nr == TAWC_SYS_lgetxattr || nr == TAWC_SYS_llistxattr ||
+	    nr == TAWC_SYS_getxattr)
+		snprintf(last_xattr_path, sizeof last_xattr_path, "%s",
+			 (const char *)args[0]);
+	return false;
+}
+
+test(hosted_xattr_rootfs_uses_host_path)
+{
+	th_view v;
+	th_setup(&v, "xattr-host");
+	char host[4300], val[32];
+	snprintf(host, sizeof host, "%s/etc/probe", v.root);
+	if (setxattr(host, "user.k", "v1", 2, 0) != 0) {
+		th_teardown(&v);
+		return;   /* filesystem without user xattrs */
+	}
+	tawcroot_test_raw_hook = note_xattr;
+	memset(val, 0, sizeof val);
+	test_int_eq(th_sys(TAWC_SYS_lgetxattr, "/etc/probe", "user.k", val,
+			   sizeof val, 0, 0), 2);
+	test_str_eq(val, "v1");
+	test_str_eq(last_xattr_path, host);
+	char list[256];
+	long n = th_sys(TAWC_SYS_llistxattr, "/etc/probe", list, sizeof list,
+			0, 0, 0);
+	test_int_eq(n, llistxattr(host, list, sizeof list));
+	/* l* on the /lib -> usr/lib symlink sees the link, not the dir. */
+	snprintf(host, sizeof host, "%s/lib", v.root);
+	long want = lgetxattr(host, "user.k", val, sizeof val);
+	if (want < 0) want = -errno;
+	long got = th_sys(TAWC_SYS_lgetxattr, "/lib", "user.k", val,
+			  sizeof val, 0, 0);
+	test_int_eq(got, want);
+	test_str_eq(last_xattr_path, host);
+	test_int_eq(th_sys(TAWC_SYS_chroot, "/etc", 0, 0, 0, 0, 0), 0);
+	memset(val, 0, sizeof val);
+	test_int_eq(th_sys(TAWC_SYS_getxattr, "/probe", "user.k", val,
+			   sizeof val, 0, 0), 2);
+	snprintf(host, sizeof host, "%s/etc/probe", v.root);
+	test_str_eq(last_xattr_path, host);
+	tawcroot_test_raw_hook = NULL;
 	th_teardown(&v);
 }
