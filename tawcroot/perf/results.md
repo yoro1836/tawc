@@ -376,3 +376,22 @@ from the app-distro runs above), per-round medians:
 | `grep_tree` | 1,088 ms | 1,014 ms | 0.93 |
 | `ls_lR_usr_lib` | 468 ms | 452 ms | 0.97 |
 | `find_usr` | 230 ms | 223 ms | 0.97 |
+
+## 2026-10-18 native vs tawcroot on the same tree (shell domain)
+
+`native-vs-shell.sh` on the device after `run-macro-shell.sh` extracted
+the full ArchLinuxARM tarball: the same GNU binaries run natively through
+the rootfs `ld.so` (absolute paths prefixed with the rootfs, slightly
+longer walks for native) and under the b258a30 runtime, alternating, 3
+rounds × 7 runs on cpu9, per-round medians:
+
+| Workload | Native | tawcroot | Ratio |
+| --- | ---: | ---: | ---: |
+| `grep -r` | 715 ms | 1,060 ms | 1.48 |
+| `tar cf` | 732 ms | 1,304 ms | 1.78 |
+| `ls -lR` | 217 ms | 449 ms | 2.07 |
+| `find -type f` | 104 ms | 221 ms | 2.12 |
+
+Metadata-only walks pay the most; workloads with real I/O and CPU work
+dilute the per-trap cost. Spawn-heavy work and pacman are not in this
+comparison.
