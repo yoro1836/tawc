@@ -16,6 +16,8 @@ load syscall_nr from seccomp_data (offset 0)
 binary search over the sorted trap set (+ rt_sigreturn):
   not in set              → ALLOW
   close, args[0] < 1000   → ALLOW   // closefrom fast path
+  fcntl, args[0] < 1000, args[1] not F_ADD_SEALS/F_GET_SEALS
+                          → ALLOW   // only reserved fds and shm seals need us
   clone with CLONE_VM     → ALLOW   // threads, vfork
   otherwise               → JA ipcheck
 ipcheck:  // cBPF is 32-bit — compare instruction_pointer in two halves

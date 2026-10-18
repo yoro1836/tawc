@@ -311,6 +311,50 @@ test(filter_close_block_does_not_eat_following_traps)
 		    SECCOMP_RET_TRAP);
 }
 
+/* fcntl matters only for a reserved fd or the emulated shm seal ops;
+ * the rest (F_GETFD/F_SETFL/F_DUPFD... on guest fds) must run natively,
+ * and the block must not disturb the NRs around it. */
+test(filter_fcntl_traps_only_reserved_fd_or_seal_ops)
+{
+	int traps[] = { TAWC_SYS_close, TAWC_SYS_fcntl, 200 };
+	struct test_seccomp_data d = {
+		.nr = TAWC_SYS_fcntl, .arch = TEST_AUDIT_ARCH,
+		.instruction_pointer = OUT_OF_STUB,
+		.args = { 7, 1 /*F_GETFD*/, 0, 0, 0, 0 },
+	};
+	test_int_eq(build_and_run(traps, 3, STUB_ADDR, 1000,
+				  TEST_AUDIT_ARCH, &d), SECCOMP_RET_ALLOW);
+	d.args[1] = 1030;   /* F_DUPFD_CLOEXEC */
+	test_int_eq(build_and_run(traps, 3, STUB_ADDR, 1000,
+				  TEST_AUDIT_ARCH, &d), SECCOMP_RET_ALLOW);
+	d.args[1] = 1033;   /* F_ADD_SEALS */
+	test_int_eq(build_and_run(traps, 3, STUB_ADDR, 1000,
+				  TEST_AUDIT_ARCH, &d), SECCOMP_RET_TRAP);
+	d.args[1] = 1034;   /* F_GET_SEALS */
+	test_int_eq(build_and_run(traps, 3, STUB_ADDR, 1000,
+				  TEST_AUDIT_ARCH, &d), SECCOMP_RET_TRAP);
+	d.args[0] = 1000;
+	d.args[1] = 1;
+	test_int_eq(build_and_run(traps, 3, STUB_ADDR, 1000,
+				  TEST_AUDIT_ARCH, &d), SECCOMP_RET_TRAP);
+	d.args[0] = (uint64_t)-1;
+	test_int_eq(build_and_run(traps, 3, STUB_ADDR, 1000,
+				  TEST_AUDIT_ARCH, &d), SECCOMP_RET_TRAP);
+	d.instruction_pointer = STUB_ADDR;
+	test_int_eq(build_and_run(traps, 3, STUB_ADDR, 1000,
+				  TEST_AUDIT_ARCH, &d), SECCOMP_RET_ALLOW);
+	/* Neighbours still route by NR, whatever fcntl's args were. */
+	d.instruction_pointer = OUT_OF_STUB;
+	d.nr = 200;
+	d.args[0] = 7;
+	d.args[1] = 1033;
+	test_int_eq(build_and_run(traps, 3, STUB_ADDR, 1000,
+				  TEST_AUDIT_ARCH, &d), SECCOMP_RET_TRAP);
+	d.nr = TAWC_SYS_close;
+	test_int_eq(build_and_run(traps, 3, STUB_ADDR, 1000,
+				  TEST_AUDIT_ARCH, &d), SECCOMP_RET_ALLOW);
+}
+
 test(filter_close_with_zero_floor_falls_through_to_default)
 {
 	/* floor 0 disables the fast path: close is treated like any normal
