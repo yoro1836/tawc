@@ -13,6 +13,12 @@ struct tawcroot_path_scratch *tawcroot_path_scratch_acquire(void)
 	for (;;) {
 		for (int i = 0; i < TAWCROOT_PATH_SCRATCH_SLOTS; i++) {
 			int expected = 0;
+			/* Skip busy slots with a plain load: a failed CAS
+			 * still takes the line exclusive, and nested
+			 * acquires walk past every slot their callers hold. */
+			if (__atomic_load_n(&g_path_scratch[i].in_use,
+					    __ATOMIC_RELAXED))
+				continue;
 			if (__atomic_compare_exchange_n(&g_path_scratch[i].in_use,
 							&expected, 1, 0,
 							__ATOMIC_ACQUIRE,

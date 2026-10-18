@@ -48,19 +48,27 @@
  * (rather than returning) so a later memo entry whose `src` happens
  * to also be a path-prefix can still apply — the memo array does not
  * guarantee unique srcs across entries. */
+/* 1 when `suf` is `p` (length n, no NUL inside) or continues it with
+ * '/'. The compare stops at suf's NUL, so callers skip a strlen of the
+ * whole path for the common miss, which is usually decided by the
+ * first byte. */
+static int prefix_component(const char *suf, const char *p, size_t n)
+{
+	for (size_t k = 0; k < n; k++)
+		if (suf[k] != p[k]) return 0;
+	return suf[n] == 0 || suf[n] == '/';
+}
+
 static int apply_memo(char *suf, size_t cap, tawcroot_path_mode mode,
 		      const struct tawcroot_symlink_memo *memos, size_t n_memos)
 {
-	size_t suf_len = tawc_strlen(suf);
 	for (size_t i = 0; i < n_memos; i++) {
 		const struct tawcroot_symlink_memo *m = &memos[i];
-		if (m->src_len > suf_len) continue;
-		if (memcmp(suf, m->src, m->src_len) != 0) continue;
-		if (suf_len > m->src_len && suf[m->src_len] != '/') continue;
-		if (suf_len == m->src_len && mode != TAWCROOT_PATH_FOLLOW) {
+		if (!prefix_component(suf, m->src, m->src_len)) continue;
+		if (suf[m->src_len] == 0 && mode != TAWCROOT_PATH_FOLLOW) {
 			continue;
 		}
-		size_t after_src_len = suf_len - m->src_len;
+		size_t after_src_len = tawc_strlen(suf + m->src_len);
 		size_t need = m->target_len + after_src_len + 1;
 		/* Doesn't fit: skip this entry (same reasoning as the
 		 * sole-component skip above — a later entry may still
@@ -106,19 +114,16 @@ static const struct tawcroot_bind *route_through_binds(
 				tawcroot_path_result *r, char *suf, size_t cap,
 				const struct tawcroot_bind *binds, size_t n_binds)
 {
-	size_t suf_len = tawc_strlen(suf);
 	const struct tawcroot_bind *best = 0;
 	for (size_t i = 0; i < n_binds; i++) {
 		const struct tawcroot_bind *b = &binds[i];
 		if (!b->active) continue;
-		if (b->dst_len > suf_len) continue;
-		if (memcmp(suf, b->dst, b->dst_len) != 0) continue;
-		if (suf_len > b->dst_len && suf[b->dst_len] != '/') continue;
+		if (!prefix_component(suf, b->dst, b->dst_len)) continue;
 		if (!best || b->dst_len > best->dst_len) best = b;
 	}
 	if (!best) return 0;
 	if (best->leaf[0]) {
-		if (suf_len != best->dst_len) r->err = TAWC_ENOTDIR;
+		if (suf[best->dst_len] != 0) r->err = TAWC_ENOTDIR;
 		else {
 			r->base_fd = best->src_fd;
 			long n = tawc_str_copy(suf, cap, best->leaf);

@@ -497,3 +497,24 @@ dozing rounds per side; medians shown):
 | `ls_lR_usr_lib` | 356 ms | 350 ms | 0.98 |
 | `grep_tree` | 956 ms | 947 ms | 0.99 |
 | `tar_usr_share` | 1,173 ms | 1,157 ms | 0.99 |
+
+## 2026-10-19 prefix matching without strlen; instruction counts
+
+`route_through_binds` (up to three calls per translation) and
+`apply_memo` took `strlen` of the whole path before comparing against
+each bind/memo, though nearly every miss is decided by the first byte;
+`path_scratch_acquire` CASed every busy slot. With the phone dozing,
+wall-time A/B could not resolve this, so the comparison is
+`simpleperf stat -e instructions:u` over the whole run (guest +
+tawcroot user mode; kernel work not included), two identical rounds:
+
+| Workload | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| `ls -lR /usr/lib` | 327.65 M | 303.89 M | −7.3% |
+| `find /usr -type f` | 82.35 M | 82.34 M | 0 |
+| `tar cf - /usr/share` | 186.94 M | 187.10 M | +0.1% |
+
+find and tar mostly take the dirfd leaf shortcut, which skips the
+orchestrator. Instruction counts repeat to ~0.01% between runs, which
+makes them the better gate for small user-space changes on a busy or
+dozing phone.
