@@ -248,8 +248,7 @@ probe tools and corrected test fixtures remain.
 Full candidate correctness runs reproduced baseline's existing failures:
 host 2,215 passed / 13 failed; device 1,691 passed / 10 failed (the
 candidate added five tests). The failures concern stale guest seccomp
-smoke expectations; see
-[the issue](../../issues/tawcroot-guest-filter-smoke-expectations.md).
+smoke expectations, since fixed (commit 2833049).
 After reverting the candidate, all 19 exec-state tests pass on host and
 device. Four malformed-state tests now start from a successfully written
 state instead of an undersized buffer, and the capacity test exercises
