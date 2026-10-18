@@ -127,6 +127,7 @@ long tawcroot_path_resolve_symlinks_tok(char *suf, size_t cap,
 	for (int hops = 0; hops < TAWC_SYMLOOP_MAX; hops++) {
 		size_t suf_len = rstrlen(suf);
 		if (suf_len == 0) return 0;        /* root, nothing to resolve */
+		if (oracle->walk_begin) oracle->walk_begin(oracle->ctx);
 
 		size_t i = 0;
 		int    walked_symlink = 0;

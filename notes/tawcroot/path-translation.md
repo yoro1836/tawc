@@ -210,6 +210,16 @@ prefix, "readlinkat returned `-EINVAL`" (exists, not a symlink).
 - **Concurrency.** Per-slot seqlocks across processes, no locks; a
   contended insert is skipped. Two independent 64-bit hashes per key.
 - Any failure to create or map the file leaves the cache off.
+- **Incremental keys.** Within one resolver pass the oracle sees
+  growing prefixes of one buffer (`walk_begin` in `path_oracle.h`
+  marks each pass), so the production oracle carries the previous
+  probe's length and hash state forward (`tawcroot_pathcache_walk_*`)
+  instead of re-running `strlen` and the hash over the whole prefix.
+  Rehashing every prefix was O(n²) in path length and the largest
+  user-space cost in tawcroot (21% of its samples in a find/ls/tar
+  profile). Prefix stamps are read when first hashed, so a mutation
+  racing the pass can go unseen for the rest of it, as with a native
+  walk racing a rename.
 
 Unit coverage: `tests/unit/test_pathcache.c`.
 

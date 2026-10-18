@@ -60,6 +60,23 @@ int tawcroot_pathcache_unchanged_since(const char *suffix, uint64_t epoch);
 /* Record readlinkat(rootfs_fd, suffix) == -EINVAL, observed at `epoch`. */
 void tawcroot_pathcache_note_plain(const char *suffix, uint64_t epoch);
 
+/* known_plain/note_plain for a resolver pass (path_oracle.h
+ * walk_begin): probes of growing prefixes of one buffer extend the
+ * previous probe's hash instead of rehashing the path from the start.
+ * Zero the walk at the start of each pass. Prefix stamps are read when
+ * first hashed, so a mutation racing the pass may go unseen for the
+ * rest of it, like a native walk racing a rename. */
+struct tawcroot_pathcache_walk {
+	const char *base;      /* NULL: nothing carried */
+	size_t      len;
+	uint64_t    h1, h2, newest;
+};
+int tawcroot_pathcache_walk_plain(struct tawcroot_pathcache_walk *w,
+				  const char *suffix, size_t len);
+void tawcroot_pathcache_walk_note(struct tawcroot_pathcache_walk *w,
+				  const char *suffix, size_t len,
+				  uint64_t epoch);
+
 /* A namespace mutation of (base_fd, suffix) has just been attempted.
  * Only rootfs-based names matter; anything else is ignored. */
 void tawcroot_pathcache_mutated(int base_fd, const char *suffix);

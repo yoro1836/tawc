@@ -153,3 +153,47 @@ test(pathcache_shared_between_mappings)
 	test_true(tawcroot_pathcache_known_plain("var/lib"));
 	end();
 }
+
+/* A resolver pass probes growing prefixes of one buffer; the walk API
+ * extends the previous hash. It must agree with the one-shot API on
+ * every prefix, in both directions, and see mutations of any prefix. */
+test(pathcache_walk_matches_one_shot)
+{
+	begin();
+	char buf[] = "usr/lib/python3/site/x.py";
+	size_t ends[] = { 3, 7, 15, 20, sizeof buf - 1 };
+	uint64_t e = tawcroot_pathcache_epoch();
+	struct tawcroot_pathcache_walk w = { 0 };
+	for (size_t i = 0; i < 5; i += 2) {
+		buf[ends[i]] = 0;
+		tawcroot_pathcache_note_plain(buf, e);
+		buf[ends[i]] = i + 1 < 5 ? '/' : 0;
+	}
+	for (size_t i = 1; i < 5; i += 2)
+		tawcroot_pathcache_walk_note(&w, buf, ends[i], e);
+	for (size_t i = 0; i < 5; i++) {
+		char saved = buf[ends[i]];
+		buf[ends[i]] = 0;
+		test_true(tawcroot_pathcache_known_plain(buf));
+		buf[ends[i]] = saved;
+	}
+	w.base = 0;
+	for (size_t i = 0; i < 5; i++)
+		test_true(tawcroot_pathcache_walk_plain(&w, buf, ends[i]));
+
+	buf[7] = 0;
+	tawcroot_pathcache_mutated(ROOT_FD, buf);
+	buf[7] = '/';
+	w.base = 0;
+	test_true(tawcroot_pathcache_walk_plain(&w, buf, ends[0]));
+	for (size_t i = 1; i < 5; i++)
+		test_false(tawcroot_pathcache_walk_plain(&w, buf, ends[i]));
+	/* Probes that skip the mutated prefix must still see it, whether
+	 * they extend an earlier probe or start fresh. */
+	w.base = 0;
+	test_true(tawcroot_pathcache_walk_plain(&w, buf, ends[0]));
+	test_false(tawcroot_pathcache_walk_plain(&w, buf, ends[3]));
+	w.base = 0;
+	test_false(tawcroot_pathcache_walk_plain(&w, buf, ends[4]));
+	end();
+}

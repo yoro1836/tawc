@@ -415,3 +415,24 @@ tarball. Baseline = same tree without the flag.
 `=1` is 5 rounds × 7 runs; `=2` 3 rounds × 7 runs (separate session, so
 compare its ratio, not its times). Signal delivery is only ~0.9 µs of a
 path trap; most of the remaining cost is in the handlers themselves.
+
+## 2026-10-19 incremental path-cache hashing
+
+A `simpleperf record -e cpu-clock:u` profile of `find`/`ls -lR`/`tar`
+under the fastpath build (shell domain; kernel samples are not
+allowed without root) put 67% of user time in tawcroot, and
+`hash_suffix` alone at 21% of that: the resolver probes every prefix,
+and each probe rehashed and `strlen`ed the whole prefix. The oracle now
+carries hash and length across a pass. Default build vs previous
+commit, `run-macro-shell.sh --rounds 5 --runs 7 --cpu 9`:
+
+| Workload | Before | After | After/before |
+| --- | ---: | ---: | ---: |
+| `ls_lR_usr_lib` | 401 ms | 371 ms | 0.93 |
+| `stat_many` | 221 ms | 209 ms | 0.95 |
+| `find_usr` | 186 ms | 183 ms | 0.98 |
+| `grep_tree` | 1,016 ms | 1,005 ms | 0.99 |
+| `tar_usr_share` | 1,249 ms | 1,236 ms | 0.99 |
+
+Absolute times run higher than the 2026-10-18 tables (different
+session and device state); compare ratios.

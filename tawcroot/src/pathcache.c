@@ -229,6 +229,73 @@ void tawcroot_pathcache_note_plain(const char *suffix, uint64_t epoch)
 	__atomic_store_n(&e->seq, s + 2, __ATOMIC_RELEASE);
 }
 
+/* Hash suffix[0..len) into `w`, extending its state when this probe
+ * continues the previous one. */
+static int walk_hash(struct tawcroot_pathcache_walk *w, const char *suffix,
+		     size_t len)
+{
+	if (!suffix || len == 0 || suffix[0] == '/') return 0;
+	if (w->base == suffix && w->len == len) return 1;
+	uint64_t h1, h2, m;
+	size_t i;
+	if (w->base == suffix && w->len < len && suffix[w->len] == '/') {
+		h1 = w->h1;
+		h2 = w->h2;
+		m = w->newest;
+		i = w->len;
+	} else {
+		root_state(&h1, &h2);
+		m = 0;
+		i = 0;
+	}
+	for (; i < len; i++) {
+		if (suffix[i] == '/') {
+			uint64_t s = load(stamp(h1));
+			if (s > m) m = s;
+		}
+		mix(&h1, &h2, (unsigned char)suffix[i]);
+	}
+	uint64_t s = load(stamp(h1));
+	w->base = suffix;
+	w->len = len;
+	w->h1 = h1;
+	w->h2 = h2;
+	w->newest = s > m ? s : m;
+	return 1;
+}
+
+int tawcroot_pathcache_walk_plain(struct tawcroot_pathcache_walk *w,
+				  const char *suffix, size_t len)
+{
+	if (!g_pc || len == 0 || suffix[len - 1] == '/') return 0;
+	if (!walk_hash(w, suffix, len)) return 0;
+	struct pc_entry *e = entry(w->h1);
+	uint32_t s1 = __atomic_load_n(&e->seq, __ATOMIC_ACQUIRE);
+	if (s1 & 1) return 0;
+	uint64_t k1 = load(&e->h1), k2 = load(&e->h2), ep = load(&e->epoch);
+	uint32_t s2 = __atomic_load_n(&e->seq, __ATOMIC_ACQUIRE);
+	return s1 == s2 && k1 == w->h1 && k2 == w->h2 && ep >= w->newest &&
+	       ep >= load(&g_pc->hdr.floor);
+}
+
+void tawcroot_pathcache_walk_note(struct tawcroot_pathcache_walk *w,
+				  const char *suffix, size_t len,
+				  uint64_t epoch)
+{
+	if (!g_pc || !epoch || len == 0 || suffix[len - 1] == '/') return;
+	if (!walk_hash(w, suffix, len)) return;
+	struct pc_entry *e = entry(w->h1);
+	uint32_t s = __atomic_load_n(&e->seq, __ATOMIC_ACQUIRE);
+	if (s & 1) return;
+	if (!__atomic_compare_exchange_n(&e->seq, &s, s + 1, 0,
+					 __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+		return;
+	__atomic_store_n(&e->h1, w->h1, __ATOMIC_RELAXED);
+	__atomic_store_n(&e->h2, w->h2, __ATOMIC_RELAXED);
+	__atomic_store_n(&e->epoch, epoch, __ATOMIC_RELAXED);
+	__atomic_store_n(&e->seq, s + 2, __ATOMIC_RELEASE);
+}
+
 void tawcroot_pathcache_mutated(int base_fd, const char *suffix)
 {
 	if (!g_pc || base_fd != tawcroot_rootfs_fd) return;

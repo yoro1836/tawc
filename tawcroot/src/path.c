@@ -517,6 +517,32 @@ long tawcroot_open_in_view(const char *guest_path)
 /* ---------------------------------------------------------------- */
 /* Production oracle + cwd source for the orchestration.             */
 
+/* Per-translation oracle state (path_oracle.h walk_begin): a pass
+ * probes growing prefixes of one buffer, so its length and pathcache
+ * hash continue from the previous probe instead of restarting. */
+struct prod_walk {
+	struct tawcroot_pathcache_walk pc;
+	const char *base;    /* buffer of the current pass; NULL: none */
+	size_t      len;     /* length of its previous probe */
+};
+
+static void prod_walk_begin(void *ctx)
+{
+	struct prod_walk *w = ctx;
+	w->pc.base = 0;
+	w->base = 0;
+}
+
+static size_t probe_len(struct prod_walk *w, const char *suffix)
+{
+	if (!w) return tawc_strlen(suffix);
+	size_t from = w->base == suffix ? w->len : 0;
+	size_t len = from + tawc_strlen(suffix + from);
+	w->base = suffix;
+	w->len = len;
+	return len;
+}
+
 /* Production oracle: readlink against tawcroot_rootfs_fd via raw
  * syscall. The empty-suffix case (rootfs root itself) is handled
  * locally — readlinkat would return -EINVAL too, but skipping the
@@ -524,11 +550,11 @@ long tawcroot_open_in_view(const char *guest_path)
 static long prod_readlink(void *ctx, const char *suffix,
 			  char *out, size_t out_cap)
 {
-	(void)ctx;
+	struct prod_walk *w = ctx;
 	if (!suffix || suffix[0] == 0) return TAWC_EINVAL;
 	if (tawcroot_rootfs_fd < 0)    return TAWC_EBADF;
 	const struct tawcroot_bind *best = 0;
-	size_t len = tawc_strlen(suffix);
+	size_t len = probe_len(w, suffix);
 	for (size_t i = 0; i < tawcroot_n_binds; ++i) {
 		const struct tawcroot_bind *b = &tawcroot_binds[i];
 		if (!b->active || b->dst_len > len ||
@@ -550,15 +576,18 @@ static long prod_readlink(void *ctx, const char *suffix,
 	 * (pathcache.h); bind routes always ask the kernel. */
 	uint64_t epoch = 0;
 	if (!best) {
-		int plain = tawcroot_pathcache_known_plain(suffix);
+		int plain = w ? tawcroot_pathcache_walk_plain(&w->pc, suffix, len)
+			      : tawcroot_pathcache_known_plain(suffix);
 		tawcroot_stats_pathcache(plain);
 		if (plain) return TAWC_EINVAL;
 		epoch = tawcroot_pathcache_epoch();
 	}
 	long n = TAWC_RAW(TAWC_SYS_readlinkat, fd,
 			  (long)suffix, (long)out, (long)out_cap, 0, 0);
-	if (n == TAWC_EINVAL && epoch)
-		tawcroot_pathcache_note_plain(suffix, epoch);
+	if (n == TAWC_EINVAL && epoch) {
+		if (w) tawcroot_pathcache_walk_note(&w->pc, suffix, len, epoch);
+		else tawcroot_pathcache_note_plain(suffix, epoch);
+	}
 	return n;
 }
 
@@ -579,12 +608,6 @@ static long prod_readlink_store(void *ctx, const char *token,
 			(long)token, (long)out, (long)out_cap, 0, 0);
 }
 
-static const struct tawcroot_path_oracle prod_oracle = {
-	.ctx            = 0,
-	.readlink       = prod_readlink,
-	.readlink_store = prod_readlink_store,
-};
-
 /* Canonical guest names stop at a hardlink's name, not its hidden
  * backing object. Hardlinked symlinks still follow their actual target. */
 static long name_readlink(void *ctx, const char *suffix, char *out, size_t cap)
@@ -598,11 +621,6 @@ static long name_readlink(void *ctx, const char *suffix, char *out, size_t cap)
 	if (tawc_str_copy(saved, sizeof saved, token) < 0) return TAWC_ENAMETOOLONG;
 	return prod_readlink_store(ctx, saved, out, cap);
 }
-
-static const struct tawcroot_path_oracle name_oracle = {
-	.readlink = name_readlink,
-	.readlink_store = prod_readlink_store,
-};
 
 /* Kernel-cwd-to-guest-absolute resolver: read the kernel cwd via raw
  * `getcwd` and reverse-translate through the shared longest-prefix
@@ -847,6 +865,13 @@ static tawcroot_path_result path_translate(const char *guest_path,
 	 * against the snapshot we take here — see notes/tawcroot/path-translation.md
 	 * §"chroot emulation" for the bounded-failure analysis. */
 
+	struct prod_walk walk = { .base = 0 };
+	struct tawcroot_path_oracle oracle = {
+		.ctx            = &walk,
+		.readlink       = preserve_name ? name_readlink : prod_readlink,
+		.readlink_store = prod_readlink_store,
+		.walk_begin     = prod_walk_begin,
+	};
 	struct tawcroot_path_translate_ctx ctx = {
 		.rootfs_base_fd   = tawcroot_rootfs_fd,
 		.rootfs_ro        = tawcroot_root_ro,
@@ -856,7 +881,7 @@ static tawcroot_path_result path_translate(const char *guest_path,
 		.n_memos          = g_n_memo,
 		.store_link_fd    = tawcroot_store_link_fd,
 		.store_upgrade    = tawcroot_linkstore_latent_upgrade,
-		.oracle           = preserve_name ? &name_oracle : &prod_oracle,
+		.oracle           = &oracle,
 		.cwd_to_guest_abs = prod_cwd_to_guest_abs,
 		.cwd_ctx          = 0,
 	};

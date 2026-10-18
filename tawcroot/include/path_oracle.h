@@ -41,8 +41,16 @@ typedef long (*tawcroot_path_readlink_fn)(void *ctx, const char *suffix,
 typedef long (*tawcroot_path_readlink_store_fn)(void *ctx, const char *token,
 						char *out, size_t out_cap);
 
+/* Called before each pass of the resolver over its buffer. Within one
+ * pass, `readlink` sees growing prefixes of the same buffer ("usr",
+ * "usr/lib", ...) with the bytes before each probe unchanged, so an
+ * oracle may carry per-prefix work (hashing, length) forward. A pass
+ * ends at the first probe that does not return -EINVAL. */
+typedef void (*tawcroot_path_walk_begin_fn)(void *ctx);
+
 struct tawcroot_path_oracle {
 	void                            *ctx;
 	tawcroot_path_readlink_fn        readlink;
 	tawcroot_path_readlink_store_fn  readlink_store;  /* may be NULL */
+	tawcroot_path_walk_begin_fn      walk_begin;      /* may be NULL */
 };
