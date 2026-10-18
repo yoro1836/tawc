@@ -359,3 +359,20 @@ only libtawcroot swapped in the same dev APK; medians of round medians:
 | `ls_lR_usr_lib` | 32 ms | 32 ms | 1.00 |
 | `pacman_Qk` | 193 ms | 191 ms | 0.99 |
 | `spawn_true_x100` | 204 ms | 206 ms | 1.01 |
+
+## 2026-10-18 stat results written straight into the guest buffer
+
+Hot stat paths (`fstat`, path and `AT_EMPTY_PATH` `newfstatat`/`statx`)
+now let the kernel fill the guest's buffer and patch the faked fields in
+place, dropping one `process_vm_writev` per call.
+`run-macro-shell.sh --rounds 3 --runs 7 --cpu 9` (adb shell domain, full
+ArchLinuxARM-aarch64-latest tarball as rootfs, so absolute times differ
+from the app-distro runs above), per-round medians:
+
+| Workload | Before | After | After/before |
+| --- | ---: | ---: | ---: |
+| `stat_many` | 272 ms | 247 ms | 0.91 |
+| `tar_usr_share` | 1,417 ms | 1,306 ms | 0.92 |
+| `grep_tree` | 1,088 ms | 1,014 ms | 0.93 |
+| `ls_lR_usr_lib` | 468 ms | 452 ms | 0.97 |
+| `find_usr` | 230 ms | 223 ms | 0.97 |

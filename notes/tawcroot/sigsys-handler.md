@@ -122,6 +122,17 @@ These helpers are used for:
 Do not use plain `memcpy`, `strlen`, or ad-hoc pointer walking on
 guest-provided addresses in handler code.
 
+One deliberate exception: the hot stat paths (`fstat`, path and
+`AT_EMPTY_PATH` `newfstatat`/`statx`) pass the guest's output buffer to
+the kernel and then patch the faked fields (uid/gid, emulated-hardlink
+count, gamepad nodes) in place (`finish_stat_direct`). The kernel
+validates the pointer and EFAULTs exactly like a native call; the
+handler only touches the buffer after that write succeeded, so it is
+mapped and writable. The residual risk is a sibling guest thread
+unmapping the buffer in between — a guest racing its own syscall. This
+saves one `process_vm_writev` per stat. Shadow stats (shm, /proc) still
+copy. Covered by `test_fs_handlers.c::hosted_stat_family_bad_out_pointer_efaults`.
+
 ### Reading and writing the saved registers
 
 The siginfo/ucontext shapes are arch-specific. We isolate this in

@@ -10,6 +10,7 @@
 
 #include <fcntl.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -563,5 +564,51 @@ test(hosted_utimensat_null_path_reserved_dirfd_ebadf)
 	test_int_eq(th_sys(TAWC_SYS_utimensat, fd, 0, 0, 0, 0, 0), 0);
 	test_int_eq(close((int)fd), 0);
 
+	th_teardown(&v);
+}
+
+/* The stat family writes the guest's buffer directly (finish_stat_direct):
+ * a bad output pointer must come back EFAULT from the kernel, never fault
+ * inside the handler, and a good one must still carry the fake root
+ * owner. */
+test(hosted_stat_family_bad_out_pointer_efaults)
+{
+	th_view v;
+	th_setup(&v, "stat-direct");
+	long page = sysconf(_SC_PAGESIZE);
+	void *none = mmap(NULL, (size_t)page, PROT_NONE,
+			  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	void *ro = mmap(NULL, (size_t)page, PROT_READ,
+			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	test_true(none != MAP_FAILED && ro != MAP_FAILED);
+	long fd = th_sys(TAWC_SYS_openat, AT_FDCWD, "/etc/probe", O_RDONLY, 0, 0, 0);
+	test_true(fd >= 0);
+	void *bad[] = { none, ro, (void *)0x10 };
+	for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+		test_int_eq(th_sys(TAWC_SYS_fstatat, AT_FDCWD, "/etc/probe",
+				   bad[i], 0, 0, 0), TAWC_EFAULT);
+		test_int_eq(th_sys(TAWC_SYS_fstatat, fd, "", bad[i],
+				   AT_EMPTY_PATH, 0, 0), TAWC_EFAULT);
+		test_int_eq(th_sys(TAWC_SYS_fstat, fd, bad[i], 0, 0, 0, 0),
+			    TAWC_EFAULT);
+		test_int_eq(th_sys(TAWC_SYS_statx, AT_FDCWD, "/etc/probe", 0,
+				   STATX_BASIC_STATS, bad[i], 0), TAWC_EFAULT);
+		test_int_eq(th_sys(TAWC_SYS_statx, fd, "", AT_EMPTY_PATH,
+				   STATX_BASIC_STATS, bad[i], 0), TAWC_EFAULT);
+	}
+	struct stat st;
+	struct statx sx;
+	memset(&st, 0xff, sizeof st);
+	memset(&sx, 0xff, sizeof sx);
+	test_int_eq(th_sys(TAWC_SYS_fstat, fd, &st, 0, 0, 0, 0), 0);
+	test_int_eq((long)st.st_uid, 0);
+	test_true(S_ISREG(st.st_mode));
+	test_int_eq(th_sys(TAWC_SYS_statx, AT_FDCWD, "/etc/probe", 0,
+			   STATX_BASIC_STATS, &sx, 0), 0);
+	test_int_eq((long)sx.stx_uid, 0);
+	test_true(sx.stx_mask & STATX_UID);
+	close((int)fd);
+	munmap(none, (size_t)page);
+	munmap(ro, (size_t)page);
 	th_teardown(&v);
 }

@@ -129,6 +129,25 @@ reported as an application speedup. This uses the same optional static
 aarch64 glibc toolchain as the exec-cost probe; no production dependency
 or runtime patching is enabled.
 
+## Real workloads without the app
+
+`macro.sh` and `trap-stats.py` go through the app's exec broker, which
+starts the app's activity on the phone (and swapping APKs relaunches it
+every round). For runtime-vs-runtime A/B without touching the app or the
+screen, `run-macro-shell.sh` extracts a distro tarball into the device
+scratch dir once and runs both runtimes from the adb `shell` domain:
+
+```sh
+TAWC_TARGET=physical tawcroot/perf/run-macro-shell.sh \
+  --rootfs-tar build/tawcroot-perf/ArchLinuxARM-aarch64-latest.tar.gz \
+  --tawcroot BASE.so --compare CANDIDATE.so --rounds 3 --cpu 9
+tawcroot/perf/run-macro-shell.sh --cleanup   # remove the rootfs
+```
+
+The rootfs stays on the device between runs (pass `--rootfs-tar` only
+the first time). Shell domain lacks the app's SELinux/seccomp context,
+so compare runtimes with it, not absolute app numbers.
+
 ## Where real workloads spend their time
 
 `trap-stats.py` attributes app-domain workload time to tawcroot. Build a

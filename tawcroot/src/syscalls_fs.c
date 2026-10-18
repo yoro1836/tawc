@@ -555,6 +555,19 @@ static long finish_stat(long rv, struct stat *local, struct stat *guest_out)
 	return ce < 0 ? ce : 0;
 }
 
+/* Hot stat paths let the kernel write the guest's buffer itself (it
+ * validates the pointer and EFAULTs exactly as a native call would)
+ * and fix the few faked fields in place, saving the process_vm_writev
+ * per call. Touching the buffer right after a successful kernel write
+ * is safe; only a sibling thread unmapping it in between could fault,
+ * and that guest is racing its own syscall. */
+static long finish_stat_direct(long rv, struct stat *guest_out)
+{
+	if (rv != 0) return rv;
+	decorate_stat(guest_out);
+	return 0;
+}
+
 static long handle_newfstatat(const tawcroot_syscall_args *args,
 			      ucontext_t *uc)
 {
@@ -586,19 +599,19 @@ static long handle_newfstatat(const tawcroot_syscall_args *args,
 		if (empty) {
 			if (tawcroot_fd_is_reserved(dirfd)) return TAWC_EBADF;
 			long rv = TAWC_RAW(TAWC_SYS_fstatat, dirfd, (long)"",
-					   (long)&local, flags, 0, 0);
+					   (long)out, flags, 0, 0);
 			if (rv == 0) {
-				int pad = S_ISSOCK(local.st_mode)
+				int pad = S_ISSOCK(out->st_mode)
 					? tawcroot_gamepad_fd_slot(dirfd) : -1;
-				if (pad >= 0) tawcroot_gamepad_stat(&local, pad);
+				if (pad >= 0) tawcroot_gamepad_stat(out, pad);
 				unsigned long c = fd_object_nlink(
-					dirfd, local.st_mode, local.st_nlink,
-					(unsigned long)local.st_dev,
-					(uint64_t)local.st_ino);
-				if (c) local.st_nlink =
-					(__typeof__(local.st_nlink))c;
+					dirfd, out->st_mode, out->st_nlink,
+					(unsigned long)out->st_dev,
+					(uint64_t)out->st_ino);
+				if (c) out->st_nlink =
+					(__typeof__(out->st_nlink))c;
 			}
-			return finish_stat(rv, &local, out);
+			return finish_stat_direct(rv, out);
 		}
 	}
 
@@ -655,16 +668,16 @@ static long handle_newfstatat(const tawcroot_syscall_args *args,
 	}
 
 	long rv = TAWC_RAW(TAWC_SYS_fstatat, t.fd, (long)resolved,
-			   (long)&local, rv_flags, 0, 0);
+			   (long)out, rv_flags, 0, 0);
 	if (rv == 0) {
 		int pad = tawcroot_gamepad_path_slot(dirfd, scratch->buf[0]);
-		if (pad >= 0) tawcroot_gamepad_stat(&local, pad);
+		if (pad >= 0) tawcroot_gamepad_stat(out, pad);
 		if (pmode == TAWCROOT_PATH_NOFOLLOW)
-			(void)stat_fixup_emulated(t.fd, t.path, &local);
+			(void)stat_fixup_emulated(t.fd, t.path, out);
 		else
-			stat_fix_nlink_in_store(t.fd, t.path, &local);
+			stat_fix_nlink_in_store(t.fd, t.path, out);
 	}
-	return finish_stat(rv, &local, out);
+	return finish_stat_direct(rv, out);
 }
 
 /* Fetch a guest-pointer path string into a stack-local buffer through
@@ -1721,6 +1734,18 @@ static long finish_statx(long rv, struct statx *local,
 	return ce < 0 ? ce : 0;
 }
 
+/* finish_stat_direct for statx: the kernel filled the guest buffer. */
+static long finish_statx_direct(long rv, struct statx *guest_out)
+{
+	if (rv != 0) return rv;
+	if (tawcroot_identity_euid() == 0 || (guest_out->stx_mode & 06000)) {
+		guest_out->stx_uid = 0;
+		guest_out->stx_gid = 0;
+	}
+	guest_out->stx_mask |= STATX_UID | STATX_GID;
+	return 0;
+}
+
 static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
@@ -1743,31 +1768,31 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 		if (empty) {
 			if (tawcroot_fd_is_reserved(dirfd)) return TAWC_EBADF;
 			long rv = TAWC_RAW(TAWC_SYS_statx, dirfd, (long)"", flags,
-					   mask, (long)&local, 0);
+					   mask, (long)out, 0);
 			if (rv == 0) {
-				int sock = !(local.stx_mask & 0x1u /*STATX_TYPE*/)
-					|| S_ISSOCK(local.stx_mode);
+				int sock = !(out->stx_mask & 0x1u /*STATX_TYPE*/)
+					|| S_ISSOCK(out->stx_mode);
 				int pad = sock ? tawcroot_gamepad_fd_slot(dirfd) : -1;
 				if (pad >= 0) {
-					local.stx_mode = S_IFCHR | 0600;
-					local.stx_rdev_major = 13;
-					local.stx_rdev_minor = 192 + pad;
-					local.stx_ino = 0x41520000u + pad;
+					out->stx_mode = S_IFCHR | 0600;
+					out->stx_rdev_major = 13;
+					out->stx_rdev_minor = 192 + pad;
+					out->stx_ino = 0x41520000u + pad;
 				}
 				unsigned long c = fd_object_nlink(
-					dirfd, local.stx_mode,
-					local.stx_nlink,
-					TAWC_MKDEV(local.stx_dev_major,
-						   local.stx_dev_minor),
-					(uint64_t)local.stx_ino);
+					dirfd, out->stx_mode,
+					out->stx_nlink,
+					TAWC_MKDEV(out->stx_dev_major,
+						   out->stx_dev_minor),
+					(uint64_t)out->stx_ino);
 				if (c) {
-					local.stx_nlink = (unsigned int)c;
-					local.stx_mask |= STATX_NLINK;
+					out->stx_nlink = (unsigned int)c;
+					out->stx_mask |= STATX_NLINK;
 				}
 				tawcroot_statx_fill_mnt_id(dirfd, NULL,
-							   mask, &local);
+							   mask, out);
 			}
-			return finish_statx(rv, &local, out);
+			return finish_statx_direct(rv, out);
 		}
 	}
 
@@ -1821,14 +1846,14 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 	if (t.is_root) rv_flags |= AT_EMPTY_PATH;
 
 	long rv = TAWC_RAW(TAWC_SYS_statx, t.fd, (long)resolved,
-			   rv_flags, mask, (long)&local, 0);
+			   rv_flags, mask, (long)out, 0);
 	if (rv == 0) {
 		int pad = tawcroot_gamepad_path_slot(dirfd, scratch->buf[0]);
 		if (pad >= 0) {
-			local.stx_mode = S_IFCHR | 0600;
-			local.stx_rdev_major = 13;
-			local.stx_rdev_minor = 192 + pad;
-			local.stx_ino = 0x41520000u + pad;
+			out->stx_mode = S_IFCHR | 0600;
+			out->stx_rdev_major = 13;
+			out->stx_rdev_minor = 192 + pad;
+			out->stx_ino = 0x41520000u + pad;
 		}
 	}
 	/* Hardlink emulation — same two fixups as handle_newfstatat:
@@ -1837,7 +1862,7 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 	 * count fix only. */
 	if (rv == 0 && tawcroot_store_link_fd >= 0) {
 		if (pmode == TAWCROOT_PATH_NOFOLLOW &&
-		    (local.stx_mode & S_IFMT) == S_IFLNK) {
+		    (out->stx_mode & S_IFMT) == S_IFLNK) {
 			char tok[TAWCROOT_LINK_TOKEN_MAX];
 			if (tawcroot_link_leaf_token(t.fd, t.path, tok,
 						     sizeof tok) == 1) {
@@ -1850,28 +1875,28 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 					ox.stx_nlink = (unsigned int)
 						tawcroot_link_count_for_stat(tok);
 					ox.stx_mask |= STATX_NLINK;
-					local = ox;
-					/* `local` now describes the store
+					*out = ox;
+					/* `out` now describes the store
 					 * object, so the mnt-id fill must
 					 * target it too — the generic
 					 * leaf fill below would fail its
 					 * dev/ino guard against it. */
 					tawcroot_statx_fill_mnt_id(
 						tawcroot_store_link_fd, tok,
-						mask, &local);
+						mask, out);
 				}
 			}
 		} else if (t.fd == tawcroot_store_link_fd && !t.is_root) {
-			local.stx_nlink = (unsigned int)
+			out->stx_nlink = (unsigned int)
 				tawcroot_link_count_for_stat(t.path);
-			local.stx_mask |= STATX_NLINK;
+			out->stx_mask |= STATX_NLINK;
 		}
 	}
 	/* No-op when the kernel supplied a mount id or the emulated-
 	 * hardlink branch above already filled one. */
 	if (rv == 0)
-		tawcroot_statx_fill_mnt_id(t.fd, resolved, mask, &local);
-	return finish_statx(rv, &local, out);
+		tawcroot_statx_fill_mnt_id(t.fd, resolved, mask, out);
+	return finish_statx_direct(rv, out);
 }
 
 /* fstat with fake-root decoration. Without this, fstat(fd) reports the
@@ -1885,19 +1910,18 @@ static long handle_fstat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	struct stat *out = (struct stat *)(uintptr_t)args->b;
 	if (tawcroot_fd_is_reserved(fd)) return TAWC_EBADF;
 	if (!out) return TAWC_EFAULT;
-	struct stat local;
-	long rv = TAWC_RAW(TAWC_SYS_fstat, fd, (long)&local, 0, 0, 0, 0);
+	long rv = TAWC_RAW(TAWC_SYS_fstat, fd, (long)out, 0, 0, 0, 0);
 	if (rv == 0) {
-		int pad = S_ISSOCK(local.st_mode)
+		int pad = S_ISSOCK(out->st_mode)
 			? tawcroot_gamepad_fd_slot(fd) : -1;
-		if (pad >= 0) tawcroot_gamepad_stat(&local, pad);
-		unsigned long c = fd_object_nlink(fd, local.st_mode,
-						  local.st_nlink,
-						  (unsigned long)local.st_dev,
-						  (uint64_t)local.st_ino);
-		if (c) local.st_nlink = (__typeof__(local.st_nlink))c;
+		if (pad >= 0) tawcroot_gamepad_stat(out, pad);
+		unsigned long c = fd_object_nlink(fd, out->st_mode,
+						  out->st_nlink,
+						  (unsigned long)out->st_dev,
+						  (uint64_t)out->st_ino);
+		if (c) out->st_nlink = (__typeof__(out->st_nlink))c;
 	}
-	return finish_stat(rv, &local, out);
+	return finish_stat_direct(rv, out);
 }
 
 /* inotify_add_watch(fd, path, mask): translate the path, then route the
