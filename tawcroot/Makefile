@@ -153,6 +153,7 @@ PROD_C := \
     $(SRC_T)/src/pathcache.c \
     $(SRC_T)/src/fdpath.c \
     $(SRC_T)/src/linkobjs.c \
+    $(SRC_T)/src/fastpath.c \
     $(SRC_T)/src/stats.c \
     $(SRC_T)/src/proc_rewrite.c \
     $(SRC_T)/src/proc_shadow.c \
@@ -349,6 +350,10 @@ $(OUT)/programs/dynamic_legacy_nr_probe: $(SRC_TS)/integration/programs/dynamic_
 # new process re-establishes rootfs view before manual-loading the
 # target binary.
 $(OUT)/programs/static_host_policy: $(SRC_TS)/integration/programs/static_host_policy_x86_64.S $(SRC_TS)/integration/programs/static_execve_exit42_x86_64.S | $(OUT)
+	@mkdir -p $(dir $@)
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
+
+$(OUT)/programs/static_svc_regs_preserved: $(SRC_TS)/integration/programs/static_svc_regs_preserved_x86_64.S | $(OUT)
 	@mkdir -p $(dir $@)
 	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
 

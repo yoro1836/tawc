@@ -395,3 +395,23 @@ rounds × 7 runs on cpu9, per-round medians:
 Metadata-only walks pay the most; workloads with real I/O and CPU work
 dilute the per-trap cost. Spawn-heavy work and pacman are not in this
 comparison.
+
+## 2026-10-18 syscall-site rewriting prototype (`TAWCROOT_FASTPATH`)
+
+Design in `notes/tawcroot/sigsys-handler.md` ("Experimental site
+rewriting"). `run-macro-shell.sh`, shell domain, cpu9, full ArchLinuxARM
+tarball. Baseline = same tree without the flag.
+
+| Workload | Base | `=1` (signals blocked) | Ratio | `=2` (unsafe ceiling) |
+| --- | ---: | ---: | ---: | ---: |
+| `stat_many` | 181 ms | 163 ms | 0.90 | 0.85 |
+| `tar_usr_share` | 954 ms | 878 ms | 0.92 | 0.87 |
+| `find_usr` | 161 ms | 151 ms | 0.94 | 0.89 |
+| `ls_lR_usr_lib` | 338 ms | 319 ms | 0.94 | 0.90 |
+| `grep_tree` | 743 ms | 712 ms | 0.96 | 0.95 |
+| `spawn_true_x100` | — | — | 1.00 | 1.00 |
+| `bash_startup_x50` | — | — | ~1.0 (noisy) | 1.02 |
+
+`=1` is 5 rounds × 7 runs; `=2` 3 rounds × 7 runs (separate session, so
+compare its ratio, not its times). Signal delivery is only ~0.9 µs of a
+path trap; most of the remaining cost is in the handlers themselves.

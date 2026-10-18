@@ -114,6 +114,7 @@ build_static  static_exit42
 build_static  static_argc_random
 build_static  static_execve_exit42
 build_static  static_host_policy
+build_static  static_svc_regs_preserved
 build_static  static_execve_proc_self_exe
 build_static  static_open_creat_argv1
 build_static  static_open_rdonly_argv1

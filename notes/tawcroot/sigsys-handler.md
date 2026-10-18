@@ -587,3 +587,44 @@ Refactored conventions every fs-handler follows (June 2026 cleanup):
   `proc_shadow_classify_at` (syscalls_fs.c), which also retries via
   fd-relative composition; `hosted_proc_shadow_open_stat_lockstep`
   fails CI if a new kind lands on only one surface.
+
+### Experimental site rewriting (`TAWCROOT_FASTPATH`)
+
+Off by default; build with `EXTRA_CFLAGS=-DTAWCROOT_FASTPATH=1
+tawcroot/build.sh --abi=aarch64`. `src/fastpath.c` skips signal delivery
+for hot guest syscall sites:
+
+- After the SIGSYS handler dispatches a trap whose nr is on a uc-free
+  allowlist (identity getters, `openat`, `close`, the stat family,
+  `readlinkat`, `faccessat{,2}`, `getdents64`, `getcwd`), it counts the
+  site. On the 4th trap it rewrites the `svc #0` into `b stub` when the
+  instruction before it is `mov {w,x}8, #nr` with the same nr. The nr at
+  a patched site is then static, so `clone`, `rt_sigreturn` and the like
+  can never be routed through it.
+- Only sites inside r-xp file-backed mappings (per `/proc/self/maps`,
+  cached) are patched; the page goes RWX for the store and back to r-x.
+  Because the mapping is already executable this needs SELinux execmem,
+  not execmod. Stubs live in RWX anonymous regions named
+  `[anon:tawcroot-fastpath]`, within branch range of the site.
+- A stub (`src/arch/aarch64_fastpath.S`) saves every register the
+  kernel would preserve (x1–x30, NZCV, caller-saved SIMD), calls
+  `tawcroot_fast_entry`, which blocks signals like the SIGSYS handler's
+  `sa_mask`, runs `tawcroot_dispatch_call(args, NULL)`, restores the
+  mask, and returns to site+4.
+- SVC and B are both architecturally safe to replace while another
+  thread executes them; the stub is written and flushed first.
+
+S24, shell domain, `run-macro-shell.sh --rounds 5`: `stat_many` 0.90,
+`tar` 0.92, `find`/`ls -lR` 0.94, `grep -r` 0.96; spawn-heavy loops
+unchanged (short processes end before sites reach the threshold).
+`TAWCROOT_FASTPATH=2` skips the two `rt_sigprocmask` calls and shows the
+ceiling (0.85–0.95) but is not reentrancy-safe: a guest signal handler
+could interrupt a seqlock writer. Removing the mask safely needs
+deferred delivery for guest handlers.
+
+Verified: all device tests pass with it on; `run-as` (app uid,
+`runas_app`, no app seccomp filter) patches and matches the default
+build with no AVC denials. Not yet run in `untrusted_app_34` with the
+app's seccomp filter. `prod_rootfs_trapped_svc_preserves_registers`
+checks register preservation across the rewrite (it catches a lost NZCV;
+getuid's path does not touch SIMD, so it cannot catch lost q regs).

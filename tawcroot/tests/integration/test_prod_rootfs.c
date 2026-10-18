@@ -250,6 +250,26 @@ test(prod_rootfs_old_android_host_policy)
 	rh_rmrf(FAKE_ROOTFS);
 }
 
+#ifndef TAWCROOT_STATIC_SVC_REGS_PRESERVED_BIN
+# error "TAWCROOT_STATIC_SVC_REGS_PRESERVED_BIN must be defined"
+#endif
+
+/* A trapped syscall repeated from one site must preserve every register
+ * the kernel ABI does, both while it goes through SIGSYS and after a
+ * fastpath build rewrote the site (src/fastpath.c). */
+test(prod_rootfs_trapped_svc_preserves_registers)
+{
+	rh_rmrf(FAKE_ROOTFS);
+	test_true(build_rootfs());
+	test_true(rh_copy_file(TAWCROOT_STATIC_SVC_REGS_PRESERVED_BIN,
+		FAKE_ROOTFS "/bin/static_svc_regs_preserved", 0755));
+	const char *args[] = {
+		"-r", FAKE_ROOTFS, "--", "/bin/static_svc_regs_preserved", NULL
+	};
+	test_int_eq(run_with(args), 42);
+	rh_rmrf(FAKE_ROOTFS);
+}
+
 test(prod_rootfs_guest_does_execve)
 {
 	rh_rmrf(FAKE_ROOTFS);

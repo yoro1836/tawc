@@ -30,6 +30,7 @@
 #include "raw_sys.h"
 #include "stats.h"
 #include "dispatch.h"
+#include "fastpath.h"
 #include "errno_neg.h"
 #include "rescue.h"
 #include "usercopy.h"
@@ -204,6 +205,7 @@ static void sigsys_handler(int sig, siginfo_t *info, void *ucontext)
 		TAWC_RAW(TAWC_SYS_write, 2, (long)line, (long)li, 0, 0, 0);
 	}
 #endif
+	tawcroot_fastpath_note(&args, uc);
 	tawcroot_arch_write_return(uc, rv);
 	resume_context(uc);
 }
