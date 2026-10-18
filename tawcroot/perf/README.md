@@ -41,6 +41,25 @@ tawcroot/perf/run-perf.sh \
 The runner writes TSV to `build/tawcroot-perf/results-*.tsv` and prints
 mean/median/min/max `ns_per_op` summary rows.
 
+## On a device
+
+`run-perf-device.sh` runs native vs tawcroot on an arm64 phone
+(`TAWC_TARGET` / `ANDROID_SERIAL`), from the adb `shell` domain against
+a minimal rootfs in the scratch dir, with interleaved rounds:
+
+```sh
+tawcroot/build.sh --abi=aarch64
+TAWC_TARGET=physical tawcroot/perf/run-perf-device.sh \
+  --rounds 10 --iterations 20000 --cpu 200
+```
+
+`--cpu` pins with `taskset` (hex mask; pick the prime core — unpinned
+runs swing 2x with core migration). The shell domain has no app
+seccomp filter or `untrusted_app` SELinux policy, so syscalls Android
+traps for apps (e.g. `openat2` on 16+) still work here; confirm
+anything policy-sensitive in the app. The bench needs a static-capable
+`aarch64-linux-gnu-gcc` (or `--cc` / `--bench-bin`).
+
 ## Local competitor tools
 
 These tools are only for local perf runs. Do not add them to the normal
@@ -120,6 +139,13 @@ The workload creates files under:
 - `readdir_entries`: repeated directory scans.
 - `create_write_unlink`: create/write/delete cycle.
 - `fork_exec_wait`: small fork/exec/wait loop.
+- `gettid`: untrapped syscall (filter cost only).
+- `getuid`: trapped, no path work (the SIGSYS round-trip floor).
+- `fstat`, `write_read_pipe`: hot fd-only syscalls.
+- `stat_deep`, `stat_leaf_symlink`, `stat_relative`, `fstatat_dirfd`:
+  path shapes that stress the resolver (8 components, a relative leaf
+  symlink, cwd-relative, dirfd-relative).
+- `signal_raise`: tgkill + delivery + trapped `rt_sigreturn`.
 
 These are microbenchmarks, not application benchmarks. Use them to spot
 large syscall-path regressions, then validate with real workloads such

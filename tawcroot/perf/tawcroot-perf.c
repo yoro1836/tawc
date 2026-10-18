@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 
 #include <dirent.h>
+#include <signal.h>
+#include <sys/syscall.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -114,6 +116,175 @@ static void bench_getpid(void)
 	uint64_t end = now_ns();
 	if (sink == (pid_t)-1) fprintf(stderr, "sink=%d\n", sink);
 	result("getpid", end - start, iterations);
+}
+
+/* Untrapped baseline: what every non-path syscall should cost. */
+static void bench_gettid(void)
+{
+	uint64_t start = now_ns();
+	volatile long sink = 0;
+	for (long i = 0; i < iterations; i++) sink ^= syscall(SYS_gettid);
+	uint64_t end = now_ns();
+	if (sink == -1) fprintf(stderr, "sink=%ld\n", sink);
+	result("gettid", end - start, iterations);
+}
+
+/* Trapped, no path work: the per-trap floor. */
+static void bench_getuid(void)
+{
+	uint64_t start = now_ns();
+	volatile uid_t sink = 0;
+	for (long i = 0; i < iterations; i++) sink ^= getuid();
+	uint64_t end = now_ns();
+	if (sink == (uid_t)-2) fprintf(stderr, "sink=%u\n", sink);
+	result("getuid", end - start, iterations);
+}
+
+static void bench_fstat(void)
+{
+	char path[4096];
+	file_path(path, sizeof path, 0);
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) die("open fstat");
+	struct stat st;
+	uint64_t start = now_ns();
+	for (long i = 0; i < iterations; i++)
+		if (fstat(fd, &st) != 0) die("fstat");
+	uint64_t end = now_ns();
+	close(fd);
+	result("fstat", end - start, iterations);
+}
+
+/* write traps (namespace uid_map emulation); read does not. */
+static void bench_write_pipe(void)
+{
+	int p[2];
+	if (pipe(p) != 0) die("pipe");
+	char b = 'x';
+	uint64_t start = now_ns();
+	for (long i = 0; i < iterations; i++) {
+		if (write(p[1], &b, 1) != 1) die("write pipe");
+		if (read(p[0], &b, 1) != 1) die("read pipe");
+	}
+	uint64_t end = now_ns();
+	close(p[0]);
+	close(p[1]);
+	result("write_read_pipe", end - start, iterations);
+}
+
+static const char deep_rel[] = "/tmp/tawcroot-perf/d1/d2/d3/d4/d5/d6/leaf.dat";
+
+static void setup_deep(void)
+{
+	char path[4096], dir[4096];
+	join_path(path, sizeof path, root_prefix, deep_rel);
+	memcpy(dir, path, strlen(path) + 1);
+	*strrchr(dir, '/') = 0;
+	mkdir_p(dir);
+	int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
+	if (fd < 0) die("open deep");
+	close(fd);
+
+	/* Relative leaf symlink, like libfoo.so.1 -> libfoo.so.1.2.3. */
+	char link[4096];
+	join_path(link, sizeof link, root_prefix, "/tmp/tawcroot-perf/work/link.so");
+	unlink(link);
+	if (symlink("file-0000.dat", link) != 0) die("symlink");
+}
+
+static void bench_stat_deep(void)
+{
+	char path[4096];
+	join_path(path, sizeof path, root_prefix, deep_rel);
+	struct stat st;
+	uint64_t start = now_ns();
+	for (long i = 0; i < iterations; i++)
+		if (stat(path, &st) != 0) die("stat deep");
+	uint64_t end = now_ns();
+	result("stat_deep", end - start, iterations);
+}
+
+static void bench_stat_leaf_symlink(void)
+{
+	char path[4096];
+	join_path(path, sizeof path, root_prefix, "/tmp/tawcroot-perf/work/link.so");
+	struct stat st;
+	uint64_t start = now_ns();
+	for (long i = 0; i < iterations; i++)
+		if (stat(path, &st) != 0) die("stat link");
+	uint64_t end = now_ns();
+	result("stat_leaf_symlink", end - start, iterations);
+}
+
+static void bench_stat_relative(void)
+{
+	char dir[4096];
+	join_path(dir, sizeof dir, root_prefix, "/tmp/tawcroot-perf/work");
+	int old = open(".", O_PATH | O_DIRECTORY | O_CLOEXEC);
+	if (old < 0) die("open cwd");
+	if (chdir(dir) != 0) die("chdir work");
+	struct stat st;
+	uint64_t start = now_ns();
+	for (long i = 0; i < iterations; i++) {
+		char name[64];
+		snprintf(name, sizeof name, "file-%04d.dat", (int)(i % nfiles));
+		if (stat(name, &st) != 0) die("stat relative");
+	}
+	uint64_t end = now_ns();
+	if (fchdir(old) != 0) die("fchdir");
+	close(old);
+	result("stat_relative", end - start, iterations);
+}
+
+static void bench_fstatat_dirfd(void)
+{
+	char dir[4096];
+	join_path(dir, sizeof dir, root_prefix, "/tmp/tawcroot-perf/work");
+	int dfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (dfd < 0) die("open dirfd");
+	struct stat st;
+	uint64_t start = now_ns();
+	for (long i = 0; i < iterations; i++) {
+		char name[64];
+		snprintf(name, sizeof name, "file-%04d.dat", (int)(i % nfiles));
+		if (fstatat(dfd, name, &st, 0) != 0) die("fstatat dirfd");
+	}
+	uint64_t end = now_ns();
+	close(dfd);
+	result("fstatat_dirfd", end - start, iterations);
+}
+
+/* Block-all + restore: what an in-process syscall fast path would pay
+ * to keep guest signal handlers out of tawcroot's handler code. */
+static void bench_sigmask_pair(void)
+{
+	sigset_t all, old;
+	sigfillset(&all);
+	uint64_t start = now_ns();
+	for (long i = 0; i < iterations; i++) {
+		syscall(SYS_rt_sigprocmask, SIG_BLOCK, &all, &old, 8);
+		syscall(SYS_rt_sigprocmask, SIG_SETMASK, &old, NULL, 8);
+	}
+	uint64_t end = now_ns();
+	result("sigmask_pair", end - start, iterations);
+}
+
+static volatile sig_atomic_t sig_hits;
+static void on_usr1(int sig) { (void)sig; sig_hits++; }
+
+/* tgkill + delivery + rt_sigreturn (always trapped). */
+static void bench_signal(void)
+{
+	struct sigaction sa;
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = on_usr1;
+	if (sigaction(SIGUSR1, &sa, NULL) != 0) die("sigaction");
+	long n = iterations / 4 + 1;
+	uint64_t start = now_ns();
+	for (long i = 0; i < n; i++) raise(SIGUSR1);
+	uint64_t end = now_ns();
+	if (sig_hits != n) fprintf(stderr, "tawcroot-perf: signal hits %d != %ld\n", (int)sig_hits, n);
+	result("signal_raise", end - start, n);
 }
 
 static void bench_stat(void)
@@ -260,13 +431,26 @@ int main(int argc, char **argv)
 	}
 
 	if (child_mode) return 0;
-	if (do_setup) setup_files();
+	if (do_setup) {
+		setup_files();
+		setup_deep();
+	}
 
+	bench_gettid();
+	bench_getuid();
 	bench_getpid();
+	bench_sigmask_pair();
+	bench_fstat();
+	bench_write_pipe();
 	bench_stat();
+	bench_stat_deep();
+	bench_stat_leaf_symlink();
+	bench_stat_relative();
+	bench_fstatat_dirfd();
 	bench_open_close();
 	bench_readdir();
 	bench_create_unlink();
 	bench_fork_exec();
+	bench_signal();
 	return 0;
 }
