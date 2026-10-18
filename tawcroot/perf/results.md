@@ -536,3 +536,16 @@ The same session's default-build vs always-mask run was noisy (two fast
 rounds per side); its fastest-run ratios were 0.88–0.96. Combined, the
 fastpath build is roughly 0.82–0.88 of the default build on these
 workloads.
+
+## 2026-10-19 native vs tawcroot, after the 10-18/19 changes
+
+`native-vs-shell.sh` (same tree, 3 rounds × 7 runs, cpu9, phone dozing
+for part of it), medians of per-round medians. "Before" is the
+2026-10-18 table above (`b258a30`).
+
+| Workload | Before | Default build (`d745d0e`) | `TAWCROOT_FASTPATH=1` (`2573c40`) |
+| --- | ---: | ---: | ---: |
+| `find -type f` | 2.12× | 1.71× | 1.32× |
+| `ls -lR` | 2.07× | 1.76× | 1.51× |
+| `tar cf` | 1.78× | 1.57× | 1.35× |
+| `grep -r` | 1.48× | 1.34× | 1.36× |
