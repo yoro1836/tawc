@@ -386,6 +386,23 @@ static long handle_fcntl(const tawcroot_syscall_args *args, ucontext_t *uc)
  * adds complexity for negligible gain — non-procfs callers eat one
  * tiny extra syscall and move on. */
 
+/* Device of the host procfs, which every /proc view (bind or guest
+ * mount of the same instance) shares. Racing first calls compute the
+ * same value. */
+static unsigned long proc_dev(void)
+{
+	static unsigned long dev;
+	unsigned long d = __atomic_load_n(&dev, __ATOMIC_RELAXED);
+	if (d) return d;
+	struct stat st;
+	if (TAWC_RAW(TAWC_SYS_fstatat, AT_FDCWD, (long)"/proc/self", (long)&st,
+		     0, 0, 0) != 0)
+		return 0;
+	d = (unsigned long)st.st_dev;
+	__atomic_store_n(&dev, d, __ATOMIC_RELAXED);
+	return d;
+}
+
 static long handle_getdents64(const tawcroot_syscall_args *args,
 			      ucontext_t *uc)
 {
@@ -398,10 +415,30 @@ static long handle_getdents64(const tawcroot_syscall_args *args,
 	                  (long)count, 0, 0, 0);
 	if (n <= 0 || tawcroot_n_reserved_fds == 0) return n;
 
-	/* Classify the dirfd via its /proc link (one readlinkat per
-	 * getdents64 call — the probe buffer must be big enough to
-	 * classify rootfs-view dirs too, not just the /proc/<pid>/fd
-	 * shape, so it lives in a scratch slot). */
+	/* Classify the directory by filesystem first: an fstat is a
+	 * fraction of the /proc/self/fd readlink, and only procfs
+	 * listings need the path.
+	 *
+	 * Hardlink emulation: emulated names must not advertise DT_LNK
+	 * (type-trusting walkers would never stat into the fixed-up stat
+	 * handlers — the file would silently vanish from find/rg results).
+	 * Every directory on the store's filesystem — the rootfs view and
+	 * any bind from that fs — gets DT_LNK → DT_UNKNOWN, an in-buffer
+	 * byte flip. DT_UNKNOWN is always a legal answer, so a same-fs
+	 * directory outside the view only costs its walker an lstat.
+	 * Only when a store is open; without one the flip would cost
+	 * lstats for nothing. */
+	struct stat dst;
+	if (TAWC_RAW(TAWC_SYS_fstat, fd, (long)&dst, 0, 0, 0, 0) != 0)
+		return n;
+	unsigned long pdev = proc_dev();
+	if (pdev && (unsigned long)dst.st_dev != pdev) {
+		if (tawcroot_store_link_fd >= 0 && tawcroot_store_dev &&
+		    (unsigned long)dst.st_dev == tawcroot_store_dev)
+			return tawcroot_dirent_filter_delink_types(buf, n);
+		return n;
+	}
+
 	char self_path[32];
 	if (tawc_proc_fd_path(self_path, sizeof self_path, fd, 0) < 0)
 		return n;
@@ -411,45 +448,7 @@ static long handle_getdents64(const tawcroot_syscall_args *args,
 	long ln = tawc_readlinkat(AT_FDCWD, self_path,
 	                          proc_link, TAWCROOT_PATH_SCRATCH_SIZE);
 	if (ln <= 0 || ln >= (long)TAWCROOT_PATH_SCRATCH_SIZE) return n;
-
-	/* Hardlink emulation: emulated names must not advertise DT_LNK
-	 * (type-trusting walkers would never stat into the fixed-up stat
-	 * handlers — the file would silently vanish from find/rg results).
-	 * Rewrite DT_LNK → DT_UNKNOWN for rootfs-view dirs — in-buffer
-	 * byte flip, zero extra syscalls beyond the probe that already
-	 * ran. Only when a store is open; without one the flip would cost
-	 * lstats for nothing. */
-	if (tawcroot_store_link_fd >= 0 &&
-	    tawcroot_rootfs_host_path_len > 0 &&
-	    (size_t)ln >= tawcroot_rootfs_host_path_len &&
-	    memcmp(proc_link, tawcroot_rootfs_host_path,
-	           tawcroot_rootfs_host_path_len) == 0 &&
-	    ((size_t)ln == tawcroot_rootfs_host_path_len ||
-	     proc_link[tawcroot_rootfs_host_path_len] == '/'))
-		return tawcroot_dirent_filter_delink_types(buf, n);
-
-	if (!tawcroot_dirent_filter_is_proc_fd_link(proc_link, ln)) {
-		/* Bind dirs need the same rewrite — the NOFOLLOW stat
-		 * fixups apply inside binds, so a token name there (legacy
-		 * of the pre-gate code; linkat no longer plants them) would
-		 * otherwise say DT_LNK while fstatat says S_IFREG. Gate on
-		 * the store's own fs first: cross-fs binds (/system,
-		 * procfs) cannot hold objects, so they skip both the
-		 * reverse-translation walk and the flip. */
-		if (tawcroot_store_link_fd >= 0 && tawcroot_store_dev) {
-			struct stat dst;
-			char *gv = scratch->buf[1];
-			if (TAWC_RAW(TAWC_SYS_fstat, fd, (long)&dst,
-				     0, 0, 0, 0) == 0 &&
-			    (unsigned long)dst.st_dev == tawcroot_store_dev &&
-			    tawcroot_host_path_to_guest_abs(
-				    proc_link, (size_t)ln, gv,
-				    TAWCROOT_PATH_SCRATCH_SIZE) > 0)
-				return tawcroot_dirent_filter_delink_types(
-					buf, n);
-		}
-		return n;
-	}
+	if (!tawcroot_dirent_filter_is_proc_fd_link(proc_link, ln)) return n;
 
 	/* Re-issue until a batch survives filtering or the kernel truly
 	 * EOFs. A batch containing ONLY reserved-fd entries (tiny guest

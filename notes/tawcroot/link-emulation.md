@@ -181,8 +181,11 @@ form and keep behaving as plain symlinks; no migration.
   window) behave as plain symlinks on NOFOLLOW surfaces — visible and
   unlinkable for cleanup — and ENOENT on FOLLOW/publish surfaces.
 - `d_ino` in directory entries is the name symlink's inode; `d_type`
-  for EVERY symlink in rootfs-view dirs is rewritten DT_LNK→DT_UNKNOWN
+  for EVERY symlink in directories on the store's filesystem (the
+  rootfs view and same-fs binds) is rewritten DT_LNK→DT_UNKNOWN
   (forces type-trusting walkers to stat into the fixed-up handlers).
+  The directory is classified by `fstat` device; only procfs listings
+  pay the `/proc/self/fd` readlink (reserved-fd hiding).
 - fd-path introspection (`readlink /proc/self/fd/N`, `/proc/self/maps`)
   of emulated hardlinks leaks raw store paths (the store is outside the
   reverse-translation prefixes). `/proc/self/exe` is unaffected.

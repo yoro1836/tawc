@@ -483,3 +483,17 @@ The xattr change alone, from `trap-stats.py --shell` on `ls_lR_usr_lib`
 alternating three times: `llistxattr` 8.18/8.25/9.08 → 7.48/7.23/7.35
 µs/trap, with `statx` steady at 6.0–6.1 µs as the control (about
 14 ms of a ~390 ms run).
+
+## 2026-10-19 getdents64 classified by device
+
+Every `getdents64` batch read `/proc/self/fd/N` to tell rootfs, bind and
+procfs listings apart. An `fstat` device check now decides; only procfs
+listings still read the link. 5 rounds × 9 runs vs `3fb9a88` (one or two
+dozing rounds per side; medians shown):
+
+| Workload | Before | After | After/before |
+| --- | ---: | ---: | ---: |
+| `find_usr` | 154 ms | 147 ms | 0.955 |
+| `ls_lR_usr_lib` | 356 ms | 350 ms | 0.98 |
+| `grep_tree` | 956 ms | 947 ms | 0.99 |
+| `tar_usr_share` | 1,173 ms | 1,157 ms | 0.99 |
