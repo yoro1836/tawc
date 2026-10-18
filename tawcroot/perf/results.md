@@ -104,3 +104,29 @@ domain cannot execve app-data files.)
 
 Path-heavy rows agree across domains; the trap floor and bare syscall
 are cheaper in the app domain on this device.
+
+## 2026-10-18 real workloads, app domain (macro.sh)
+
+Arch Linux ARM in the dev app, S24, pinned to cpu9 (`--cpu 9`), wall
+ms per workload (median of 5, medians across 2–3 interleaved rounds),
+before = bee5ae2 libtawcroot.so repacked into the same APK, after =
+a4a9abc. Unpinned runs swung 2x and even flipped direction, so pin.
+
+| workload         | before | after | after/before |
+|------------------|-------:|------:|-------------:|
+| spawn_true_x100  |    187 |   191 |         1.02 |
+| find_usr         |     88 |    67 |         0.76 |
+| ls_lR_usr_lib    |     49 |    32 |         0.66 |
+| stat_many        |     59 |    35 |         0.60 |
+| grep_tree        |    244 |   178 |         0.73 |
+| tar_usr_share    |    330 |   225 |         0.68 |
+| pacman_Ql        |     39 |    32 |         0.83 |
+| pacman_Qk        |    330 |   210 |         0.64 |
+| bash_startup_x50 |    155 |   127 |         0.82 |
+| sed_awk_pipe     |     61 |    57 |         0.93 |
+
+Filesystem-heavy work is 17–40% faster; process-spawn work (≈1.9 ms per
+fork+exec of `true`, 2.5 ms per bash) did not move: the exec path is
+now the largest unchanged cost. One unpinned `find_usr` run took 323 s
+(median of its 5 runs was normal); not reproduced in 30 + 6 further
+runs, cause unknown.
