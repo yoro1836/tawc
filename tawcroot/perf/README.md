@@ -165,6 +165,13 @@ sources of `/proc/self/fd` readlinks, and `--exec-child` init split into
 phases with minor faults. Handler time excludes SIGSYS delivery and
 return. Reinstall the production runtime afterwards.
 
+Without the app: after `run-macro-shell.sh` has extracted its rootfs,
+`trap-stats.py --shell <stats-built libtawcroot.so>` runs the same
+workloads from the adb shell domain (nothing is installed or launched;
+the binary and stats file are removed afterwards). With
+`TAWCROOT_FASTPATH` on, rewritten sites bypass the SIGSYS handler and
+are not counted, so profile the default build.
+
 ## Local competitor tools
 
 These tools are only for local perf runs. Do not add them to the normal

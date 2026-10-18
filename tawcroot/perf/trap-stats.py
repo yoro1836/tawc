@@ -10,8 +10,12 @@ counts and handler time per syscall, guest execs with their prepare and
 --exec-child init time. An `empty` workload measures the fixed cost of
 one broker invocation, which is subtracted from the others.
 
+With --shell BIN the app is not used: the stats-built runtime BIN runs
+the workloads from the adb shell domain against the rootfs that
+run-macro-shell.sh extracted into the device scratch dir.
+
 Usage: TAWC_TARGET=physical tawcroot/perf/trap-stats.py [--cpu 9]
-           [--install arch] [--top 12] [--workloads a,b,...]
+           [--install arch] [--top 12] [--workloads a,b,...] [--shell BIN]
 """
 import argparse
 import base64
@@ -55,14 +59,36 @@ def syscall_names():
     return names
 
 
+SHELL_DEV = "/data/local/tmp/tawc-dev/macro"   # run-macro-shell.sh's dir
+SHELL_ROOT = SHELL_DEV + "/rootfs"
+SHELL_BIN = SHELL_DEV + "/tawcroot-stats-bin"
+
+
+def adb_shell(cmd):
+    return subprocess.run(["adb", "shell", cmd], capture_output=True, check=False)
+
+
+def select_device():
+    if os.environ.get("ANDROID_SERIAL"):
+        return
+    r = subprocess.run(["bash", "-c", f"source {REPO}/scripts/lib/select-device.sh"
+                        " >/dev/null && echo $ANDROID_SERIAL"],
+                       capture_output=True, text=True, check=False)
+    serial = r.stdout.strip()
+    if not serial:
+        sys.exit(f"ERROR: no device: {r.stderr.strip()}")
+    os.environ["ANDROID_SERIAL"] = serial
+
+
 def broker(args, stdin=None):
     cmd = [os.path.join(REPO, "scripts/tawc-exec.sh")] + args
     env = dict(os.environ, TAWC_OP_TITLE="")
     return subprocess.run(cmd, input=stdin, capture_output=True, env=env, check=False)
 
 
-def snapshot(path):
-    r = broker(["--", "/system/bin/sh", "-c", f"base64 -w0 {path} 2>/dev/null || base64 {path}"])
+def snapshot(path, shell):
+    read = f"base64 -w0 {path} 2>/dev/null || base64 {path}"
+    r = adb_shell(read) if shell else broker(["--", "/system/bin/sh", "-c", read])
     raw = base64.b64decode(r.stdout.strip() or b"")
     words = HEADER_WORDS + 4 * NR_MAX
     if len(raw) < words * 8:
@@ -78,12 +104,18 @@ def diff(a, b):
     return [y - x for x, y in zip(a, b)]
 
 
-def run_workload(install, cpu, cmd):
+def run_workload(install, cpu, cmd, shell):
     pin = f"taskset -c {cpu} " if cpu else ""
     # Time inside the guest so broker startup is excluded from wall.
     script = (f's=$EPOCHREALTIME; {pin}bash -c {quote(cmd)} >/dev/null 2>&1 </dev/null; '
               'e=$EPOCHREALTIME; echo WALL $(( ${e/./} - ${s/./} ))')
-    r = broker(["--in-rootfs", install, "--", "bash", "-c", quote(script)])
+    if shell:
+        r = adb_shell(f"cd {SHELL_ROOT} && {SHELL_BIN} -r {SHELL_ROOT}"
+                      " -b /dev:/dev -b /proc:/proc -b /sys:/sys --"
+                      " /usr/bin/env -i PATH=/usr/bin:/bin HOME=/root LANG=C"
+                      f" /usr/bin/bash -c {quote(script)}")
+    else:
+        r = broker(["--in-rootfs", install, "--", "bash", "-c", quote(script)])
     m = re.search(rb"WALL (\d+)", r.stdout)
     if not m:
         sys.exit(f"ERROR: workload failed: {cmd}\n{r.stdout.decode()}{r.stderr.decode()}")
@@ -101,18 +133,27 @@ def main():
     ap.add_argument("--app-data", default="/data/user/0/me.phie.tawc.dev")
     ap.add_argument("--top", type=int, default=12)
     ap.add_argument("--workloads", default="")
+    ap.add_argument("--shell", metavar="BIN", default="")
     opt = ap.parse_args()
     stats_path = f"{opt.app_data}/distros/{opt.install}/tawcroot-stats"
+    shell = bool(opt.shell)
+    if shell:
+        select_device()
+        if adb_shell(f"[ -f {SHELL_ROOT}/.tawc-ready ] && echo yes").stdout.strip() != b"yes":
+            sys.exit("ERROR: no shell rootfs; run tawcroot/perf/run-macro-shell.sh first")
+        subprocess.run(["adb", "push", "-q", opt.shell, SHELL_BIN], check=True)
+        adb_shell(f"chmod 755 {SHELL_BIN}; rm -f {SHELL_DEV}/tawcroot-stats")
+        stats_path = f"{SHELL_DEV}/tawcroot-stats"
     names = syscall_names()
     wanted = set(filter(None, opt.workloads.split(",")))
     selected = [w for w in WORKLOADS if not wanted or w[0] in wanted or w[0] == "empty"]
 
     rows = []
     for name, cmd in selected:
-        run_workload(opt.install, opt.cpu, cmd)          # warm-up
-        a = snapshot(stats_path)
-        wall_us = run_workload(opt.install, opt.cpu, cmd)
-        b = snapshot(stats_path)
+        run_workload(opt.install, opt.cpu, cmd, shell)   # warm-up
+        a = snapshot(stats_path, shell)
+        wall_us = run_workload(opt.install, opt.cpu, cmd, shell)
+        b = snapshot(stats_path, shell)
         rows.append((name, wall_us, diff(a, b), b[1]))
 
     base = rows[0][2]
@@ -151,6 +192,8 @@ def main():
                   f" {ticks[n] * tick_us / 1000:8.2f} ms"
                   f" {ticks[n] * tick_us / counts[n]:7.2f} us/trap"
                   f" {inner_by[n] / counts[n]:5.1f} inner syscalls/trap")
+    if shell:
+        adb_shell(f"rm -f {SHELL_BIN} {SHELL_DEV}/tawcroot-stats")
 
 
 if __name__ == "__main__":
