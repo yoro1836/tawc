@@ -34,6 +34,7 @@
 #include <sys/prctl.h>
 
 #include "arch.h"
+#include "errno_neg.h"
 #include "fdtab.h"
 #include "filter.h"
 #include "filter_build.h"
@@ -69,15 +70,41 @@ long tawcroot_install_smoke_filter(int trap_syscall_nr)
 	return tawcroot_install_filter(one, 1);
 }
 
+static long install_filter_flags(const int *trap_nrs, size_t n_traps,
+				 unsigned int flags,
+				 struct sock_filter *prog, size_t prog_cap);
+
 long tawcroot_install_filter(const int *trap_nrs, size_t n_traps)
 {
-	/* The cBPF jump-table covering the trap set. Two instructions per
-	 * trapped syscall: one JEQ on nr, then a RET TRAP if matched. We
-	 * emit a fall-through RET ALLOW at the end. The kernel limit is
-	 * BPF_MAXINSNS = 4096 — plenty for our ~30 traps. The build itself
-	 * is in `filter_build.c` (PROD_C_FOR_TESTS) so unit tests can
-	 * walk the program through a hosted BPF interpreter. */
+	/* The kernel limit is BPF_MAXINSNS = 4096. */
 	struct sock_filter prog[4096];
+	return install_filter_flags(trap_nrs, n_traps, 0, prog,
+				    sizeof prog / sizeof prog[0]);
+}
+
+/* Stacked on top of the base filter, so it only adds TRAPs (TRAP beats
+ * ALLOW across filters, and a NR both filters trap still delivers one
+ * SIGSYS). TSYNC because the guest may be multi-threaded: emulated
+ * unshare(CLONE_NEWUSER) has no single-thread rule. Every thread shares
+ * the same filter stack, so TSYNC cannot fail on divergence. */
+long tawcroot_install_lazy_filter(const int *trap_nrs, size_t n_traps)
+{
+	/* Runs inside the SIGSYS handler on a guest stack: a small program
+	 * buffer, and a lock because the builder keeps static state. */
+	static int lock;
+	struct sock_filter prog[64];
+	while (__atomic_exchange_n(&lock, 1, __ATOMIC_ACQUIRE)) {}
+	long rv = install_filter_flags(trap_nrs, n_traps,
+				       SECCOMP_FILTER_FLAG_TSYNC, prog,
+				       sizeof prog / sizeof prog[0]);
+	__atomic_store_n(&lock, 0, __ATOMIC_RELEASE);
+	return rv;
+}
+
+static long install_filter_flags(const int *trap_nrs, size_t n_traps,
+				 unsigned int flags,
+				 struct sock_filter *prog, size_t prog_cap)
+{
 	/* Trap the entire reserved half-space [BASE, ∞) for close via a
 	 * range compare — covers fds reserved at runtime (shm/chroot), not
 	 * just the install-time set. Disable the fast path (floor 0 → close
@@ -86,8 +113,7 @@ long tawcroot_install_filter(const int *trap_nrs, size_t n_traps)
 	int floor = (tawcroot_n_reserved_fds > 0)
 		? TAWCROOT_RESERVED_FD_BASE : 0;
 
-	long n = tawcroot_build_filter(prog,
-				       sizeof prog / sizeof prog[0],
+	long n = tawcroot_build_filter(prog, prog_cap,
 				       trap_nrs, n_traps,
 				       (uint64_t)(uintptr_t)&tawcroot_raw_syscall_ret[0],
 				       floor,
@@ -143,5 +169,7 @@ long tawcroot_install_filter(const int *trap_nrs, size_t n_traps)
 		}
 	}
 #endif
-	return tawc_seccomp(SECCOMP_SET_MODE_FILTER, 0, &fprog);
+	long rv = tawc_seccomp(SECCOMP_SET_MODE_FILTER, flags, &fprog);
+	/* TSYNC returns the tid of a thread it could not sync, not -errno. */
+	return rv > 0 ? TAWC_EAGAIN : rv;
 }

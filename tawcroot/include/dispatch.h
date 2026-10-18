@@ -36,6 +36,13 @@ typedef long (*tawcroot_handler_fn)(const tawcroot_syscall_args *args,
 
 void tawcroot_dispatch_install(int nr, tawcroot_handler_fn fn);
 
+/* Install a handler whose syscall stays out of the base filter: it
+ * only has work to do once some runtime state turns on, and the code
+ * that turns it on stacks a filter trapping it then
+ * (tawcroot_install_lazy_filter). Until then the syscall runs at
+ * native speed. */
+void tawcroot_dispatch_install_lazy(int nr, tawcroot_handler_fn fn);
+
 /* Stock handlers for trapped-and-denied syscalls. -ENOSYS makes
  * callers fall back to an older syscall we do translate (openat2,
  * fchmodat2, clone3, io_uring_*); -EPERM is the proot-style lie for
@@ -53,5 +60,6 @@ void tawcroot_dispatch_init(void);
 /* Returns the trap-syscall list for the BPF filter generator. The caller
  * passes a buffer; we fill it with syscall numbers in ascending
  * NR order (a table scan, not install order) and return the count. The
- * list is the union of "every syscall with a non-NULL dispatch slot". */
+ * list is "every syscall with a non-NULL dispatch slot", minus the
+ * lazy ones. */
 size_t tawcroot_dispatch_trap_list(int *out, size_t out_cap);

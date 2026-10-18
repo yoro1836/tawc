@@ -83,6 +83,10 @@
 # error "TAWCROOT_STATIC_IO_URING_DENY_BIN must be defined"
 #endif
 
+#ifndef TAWCROOT_STATIC_NAMESPACE_CHECK_BIN
+# error "TAWCROOT_STATIC_NAMESPACE_CHECK_BIN must be defined"
+#endif
+
 #ifndef TAWCROOT_TEST_TMPDIR
 # define TAWCROOT_TEST_TMPDIR "/tmp"
 #endif
@@ -124,6 +128,8 @@ static bool build_rootfs(void)
 		  "static_open_creat_argv1" },
 		{ TAWCROOT_STATIC_IO_URING_DENY_BIN,
 		  "static_io_uring_deny" },
+		{ TAWCROOT_STATIC_NAMESPACE_CHECK_BIN,
+		  "static_namespace_check" },
 	};
 	for (size_t i = 0; i < sizeof fixtures / sizeof fixtures[0]; i++) {
 		snprintf(p, sizeof p, "%s/bin/%s",
@@ -607,5 +613,21 @@ test(prod_io_uring_all_three_deny)
 	};
 	test_int_eq(run_with(args), 42);
 
+	rh_rmrf(FAKE_ROOTFS);
+}
+
+/* write/getpid/getppid/kill/tgkill are out of the base filter and get
+ * trapped by a stacked filter when the guest first creates a fake user
+ * or PID namespace. The fixture checks plain behaviour before, emulated
+ * uid_map writes after unshare(CLONE_NEWUSER), and pid 1 inside a
+ * clone(CLONE_NEWPID) child. */
+test(prod_lazy_namespace_traps)
+{
+	rh_rmrf(FAKE_ROOTFS);
+	test_true(build_rootfs());
+	const char *args[] = {
+		"-r", FAKE_ROOTFS, "--", "/bin/static_namespace_check", NULL
+	};
+	test_int_eq(run_with(args), 42);
 	rh_rmrf(FAKE_ROOTFS);
 }

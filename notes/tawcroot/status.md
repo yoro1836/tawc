@@ -531,10 +531,6 @@ backed by a very large profiled win.
   synthesized btime + idle-only cpu line because procps `ps`
   hard-requires `btime`, and `/proc/uptime` reports idle equal to
   uptime so the two agree.)
-- **Path-component negative cache** (perf; profile first). Cache
-  recent "not a symlink" prefix components so the resolver skips
-  repeated `readlinkat` calls. Bounded table, invalidated on root-view
-  changes and relevant `symlinkat` calls.
 - **fd-provenance table** (perf; profile first). Track
   fd → rootfs/bind/host provenance at fd creation/dup sites to avoid
   `/proc/self/fd/<n>` readlinks on fd-relative path operations.
@@ -550,6 +546,12 @@ Considered and rejected — don't re-propose without new evidence:
   tried and reverted — it re-roots cross-bind absolute symlink
   targets at the bind src dirfd (broke `/system/lib64` → `/apex`
   bionic). See the history note atop `include/path_resolve.h`.
+  A `RESOLVE_NO_SYMLINKS` probe (reject, never re-root) would keep
+  the resolver's semantics, but app policy is not uniform: phasing.md
+  records Android 16 `untrusted_app` TRAPping `openat2`, while a
+  Galaxy S24 on Android 17 (`untrusted_app_34`, kernel 6.1) allows it
+  (2026-10-18 probe). The shared path cache (`include/pathcache.h`)
+  covers the same cost without depending on it.
 
 ## Confirmed environment
 

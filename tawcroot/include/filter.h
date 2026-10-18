@@ -20,5 +20,11 @@ long tawcroot_install_smoke_filter(int trap_syscall_nr);
  * of truth. Returns 0 / -errno. */
 long tawcroot_install_filter(const int *trap_nrs, size_t n_traps);
 
+/* Stack a filter trapping a lazy set (tawcroot_dispatch_install_lazy)
+ * on every thread, once the state that gives those handlers work turns
+ * on. Inherited across fork and the --exec-child re-exec like the base
+ * filter. Returns 0 / -errno. */
+long tawcroot_install_lazy_filter(const int *trap_nrs, size_t n_traps);
+
 /* Sets PR_SET_NO_NEW_PRIVS, the prerequisite for unprivileged seccomp. */
 long tawcroot_set_no_new_privs(void);

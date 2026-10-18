@@ -17,6 +17,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <sys/uio.h>
+
 #include "arch.h"
 #include "dispatch.h"
 #include "errno_neg.h"
@@ -29,6 +31,7 @@
 #include "raw_sys.h"
 #include "rescue.h"
 #include "syscalls_exec.h"
+#include "tawc_string.h"
 #include "tawc_uapi.h"
 #include "usercopy.h"
 
@@ -55,11 +58,34 @@
  * is exhausted or a string exceeds MAX_ARG_STRLEN, -EFAULT
  * for bad guest pointers). A NULL guest array is treated as an empty
  * list, matching the kernel (Linux permits execve(path, NULL, NULL)). */
+/* Entries per batched read, and the bytes of each string fetched in
+ * the batch. Longer strings fall back to a full string copy. */
+#define BATCH      32
+#define BATCH_HEAD 256u
+#define GUEST_PAGE 4096u
+
+/* Batch staging; lives in the private exec_scratch mapping, not on
+ * the signal stack. */
+struct exec_batch {
+	uintptr_t    ptr[BATCH];
+	struct iovec iov[BATCH];
+	char         heads[BATCH * BATCH_HEAD];
+};
+
+static size_t to_page_end(uintptr_t a)
+{
+	return GUEST_PAGE - (a & (GUEST_PAGE - 1));
+}
+
 static long collect_array(char *const *guest_arr,
                           char *strings, size_t strings_cap,
                           const char **ptrs, int cap,
-                          size_t max_string, size_t *used)
+                          size_t max_string, size_t *used,
+                          struct exec_batch *batch)
 {
+	uintptr_t    *p     = batch->ptr;
+	struct iovec *riov  = batch->iov;
+	char         *heads = batch->heads;
 	if (!guest_arr) {
 		/* Kernel-compatible: a NULL argv/envp is an empty list. */
 		ptrs[0] = (const char *)0;
@@ -67,41 +93,72 @@ static long collect_array(char *const *guest_arr,
 		return 0;
 	}
 
+	/* Batched: one read for up to BATCH pointers, one for the heads of
+	 * their strings. Every range starts at an address the guest
+	 * vouched for (a slot before the terminator, a string pointer) and
+	 * stays inside that address's page, so a batch never faults on
+	 * bytes the kernel itself would not have touched. */
 	size_t off = 0;
 	int i = 0;
 	for (;;) {
-		/* Copy the pointer at guest_arr[i] into local p. */
-		uintptr_t p = 0;
-		long rc = tawc_copy_from_guest(&p, sizeof p,
-		                               (const void *)&guest_arr[i]);
+		uintptr_t slot = (uintptr_t)&guest_arr[i];
+		size_t nptr = to_page_end(slot) / sizeof(uintptr_t);
+		if (nptr == 0) nptr = 1;
+		if (nptr > BATCH) nptr = BATCH;
+		long rc = tawc_copy_from_guest(p, nptr * sizeof p[0],
+		                               (const void *)slot);
 		if (rc < 0) return rc;
-		if (p == 0) {
+
+		size_t nstr = 0;
+		while (nstr < nptr && p[nstr]) {
+			size_t len = to_page_end(p[nstr]);
+			riov[nstr].iov_base = (void *)p[nstr];
+			riov[nstr].iov_len = len < BATCH_HEAD ? len : BATCH_HEAD;
+			nstr++;
+		}
+		long got = nstr ? tawc_readv_from_guest(heads, riov, (int)nstr) : 0;
+		if (got < 0) got = 0;
+
+		size_t hoff = 0;
+		for (size_t k = 0; k < nstr; k++, i++) {
+			/* `ptrs` holds cap+1 slots: exactly `cap` entries plus
+			 * the NULL terminator fit; only a non-NULL entry at
+			 * index cap overflows. */
+			if (i >= cap) return TAWC_E2BIG;
+			size_t avail = strings_cap > off ? strings_cap - off : 0;
+			if (avail == 0) return TAWC_E2BIG;
+			size_t want = avail > max_string ? max_string : avail;
+
+			long n = -1;
+			size_t hl = riov[k].iov_len;
+			if ((size_t)got >= hoff + hl) {
+				for (size_t b = 0; b < hl; b++)
+					if (heads[hoff + b] == 0) { n = (long)b; break; }
+			}
+			if (n >= 0 && (size_t)n < want) {
+				memcpy(strings + off, heads + hoff, (size_t)n + 1);
+			} else {
+				/* Long string, or the batch stopped short. */
+				n = tawc_copy_string_from_guest(strings + off, want,
+				                                (const char *)p[k]);
+				if (n < 0) {
+					/* A single oversized argv/env string is
+					 * -E2BIG to the kernel (MAX_ARG_STRLEN),
+					 * not the -ENAMETOOLONG our string copy
+					 * returns for a too-long path. */
+					if (n == TAWC_ENAMETOOLONG) return TAWC_E2BIG;
+					return n;
+				}
+			}
+			hoff += hl;
+			ptrs[i] = strings + off;
+			off += (size_t)n + 1;  /* +1 for the NUL */
+		}
+		if (nstr < nptr) {
 			ptrs[i] = (const char *)0;
 			*used = off;
 			return i;
 		}
-		/* `ptrs` holds cap+1 slots: exactly `cap` entries plus the
-		 * NULL terminator fit; only a non-NULL entry at index cap
-		 * overflows. */
-		if (i >= cap) return TAWC_E2BIG;
-
-		/* Copy the string at p. */
-		size_t avail = strings_cap > off ? strings_cap - off : 0;
-		if (avail == 0) return TAWC_E2BIG;
-		size_t want = avail > max_string ? max_string : avail;
-		long n = tawc_copy_string_from_guest(strings + off, want,
-		                                     (const char *)p);
-		if (n < 0) {
-			/* A single oversized argv/env string is -E2BIG to the
-			 * kernel (MAX_ARG_STRLEN), not the -ENAMETOOLONG our
-			 * string copy returns for a too-long path. Reshape it
-			 * so the guest sees the errno execve(2) really gives. */
-			if (n == TAWC_ENAMETOOLONG) return TAWC_E2BIG;
-			return n;
-		}
-		ptrs[i] = strings + off;
-		off += (size_t)n + 1;  /* +1 for the NUL */
-		i++;
 	}
 }
 
@@ -114,6 +171,7 @@ struct exec_scratch {
 	char suffix[EXEC_PATH_CAP];
 	const char *argv[MAX_ARGS + 1];
 	const char *envp[MAX_ENV + 1];
+	struct exec_batch batch;          /* collect_array staging */
 };
 
 /* Common path: parse arg0 = path pointer, arg1 = argv, arg2 = envp;
@@ -145,11 +203,12 @@ static long do_exec_path(struct exec_scratch *scratch, const char *path,
 	const char **argv_ptrs = scratch->argv;
 	const char **envp_ptrs = scratch->envp;
 	long argc = collect_array(guest_argv, strings, budget,
-	                          argv_ptrs, MAX_ARGS, max_string, &argv_bytes);
+	                          argv_ptrs, MAX_ARGS, max_string, &argv_bytes,
+	                          &scratch->batch);
 	if (argc < 0) { rc = argc; goto done; }
 	long envc = collect_array(guest_envp, strings + argv_bytes,
 	                          budget - argv_bytes, envp_ptrs, MAX_ENV,
-	                          max_string, &env_bytes);
+	                          max_string, &env_bytes, &scratch->batch);
 	if (envc < 0) { rc = envc; goto done; }
 	/* Include the pointer charge and AT_EXECFN string, as Linux does. */
 	size_t pointer_bytes = ((size_t)(argc ? argc : 1) + (size_t)envc)

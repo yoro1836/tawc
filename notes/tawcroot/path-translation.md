@@ -185,6 +185,34 @@ Then apply these rules to the guest-absolute path `P`:
    effectively immutable in ALARM. If it bites, invalidate on
    `symlinkat`/`rename`/`unlinkat` of cached prefixes.
 
+### Shared path cache
+
+The resolver probes every prefix with `readlinkat`, one syscall per
+component, which on Android costs more than most of the syscalls the
+guest asked for. The production oracle (`prod_readlink`, path.c) first
+asks `include/pathcache.h`: a distro-wide `MAP_SHARED` file beside the
+link store (`<rootfs>/../tawcroot-pathcache`) holding one fact per
+prefix, "readlinkat returned `-EINVAL`" (exists, not a symlink).
+
+- **Keys** hash the canonical host path (rootfs host path + `/` +
+  suffix), so a guest chroot shares keys for the same objects. Bind
+  routes are never cached.
+- **Invalidation.** unlink/rmdir/rename (both operands) stamp the
+  name with a fresh epoch after the host call; an entry is valid only
+  while its epoch is at least the newest stamp on any of its own
+  prefixes. Entries carry the epoch read before their `readlinkat`, so
+  a fact observed before a mutation finished never outlives it. linkat
+  (which can turn its source into an emulated-hardlink symlink by many
+  routes) drops the whole cache, as does every top-level tawcroot
+  start — the guard against changes made outside tawcroot between
+  sessions. Changes made outside tawcroot while a session runs are
+  not seen.
+- **Concurrency.** Per-slot seqlocks across processes, no locks; a
+  contended insert is skipped. Two independent 64-bit hashes per key.
+- Any failure to create or map the file leaves the cache off.
+
+Unit coverage: `tests/unit/test_pathcache.c`.
+
 ### DAC override
 
 tawcroot fakes uid 0, but the kernel sees the app uid on every real

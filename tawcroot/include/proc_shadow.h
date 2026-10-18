@@ -136,9 +136,10 @@ size_t tawcroot_proc_magic_link_prefix(const char *suf);
 #define TAWCROOT_PROC_MAGIC_CONTAIN   3
 size_t tawcroot_proc_magic_link_classify(const char *suf, int *kind);
 
-/* Fast-out for fd-relative accesses: can this relative leaf even
- * compose into a /proc path we shadow? Cheap first-byte test that skips
- * the readlinkat for the vast majority of fd-relative opens and stats. */
+/* Fast-out for fd-relative accesses: can this relative path even
+ * compose into a /proc path we shadow? Cheap last-component test that
+ * skips the readlinkat for the vast majority of fd-relative opens and
+ * stats. */
 int tawcroot_could_be_proc_relative(const char *p);
 
 /* Compose `dirfd`'s host path (via /proc/self/fd/<n>) with a relative

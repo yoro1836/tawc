@@ -35,6 +35,7 @@
 #include "linkstore.h"
 #include "path.h"
 #include "path_oracle.h"
+#include "pathcache.h"
 #include "path_orchestrate.h"
 #include "path_resolve.h"
 #include "path_scratch.h"
@@ -536,8 +537,17 @@ static long prod_readlink(void *ctx, const char *suffix,
 		while (*suffix == '/') ++suffix;
 		if (!*suffix) return TAWC_EINVAL;
 	}
+	/* Rootfs prefixes go through the shared not-a-symlink cache
+	 * (pathcache.h); bind routes always ask the kernel. */
+	uint64_t epoch = 0;
+	if (!best) {
+		if (tawcroot_pathcache_known_plain(suffix)) return TAWC_EINVAL;
+		epoch = tawcroot_pathcache_epoch();
+	}
 	long n = TAWC_RAW(TAWC_SYS_readlinkat, fd,
 			  (long)suffix, (long)out, (long)out_cap, 0, 0);
+	if (n == TAWC_EINVAL && epoch)
+		tawcroot_pathcache_note_plain(suffix, epoch);
 	return n;
 }
 

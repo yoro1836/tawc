@@ -5,18 +5,24 @@
  * ownership word is claimed with a CAS and otherwise written by the
  * owning thread alone.
  *
- * Slot lifetime. The wrapper claims a slot keyed by the trapping
- * thread's tid, and releases it when the handler returns. `exit(2)`
- * must not be trapped: musl can unmap its stack before calling it.
- * The exec commit path calls tawcroot_rescue_restore() and then
- * replaces the process image (fresh BSS, whole table gone). A slot
- * can leak across fork: `clone` is not in the trap set, so a fork never happens
- *     *inside* the wrapper; a multi-threaded guest that forks while a
- *     sibling thread is mid-trap leaves that sibling's slot claimed in
- *     the child. Bounded (one per concurrently-trapping sibling per
- *     fork) and self-healing on tid reuse, since a claim first
- *     reclaims any slot already carrying our own tid. A full table
- *     just means no rescue for that call.
+ * Recording is lazy: the first run of a handler claims nothing and
+ * records nothing, so the happy path pays no gettid, no CAS and no
+ * route copy. Only an -EACCES at virtual root claims a slot (keyed by
+ * tid) and re-runs the handler once to record its routes, then widens
+ * and retries as before. A handler that fails EACCES has made no
+ * change the recording run could double, the same assumption the
+ * widened retry already relied on.
+ *
+ * Slot lifetime. The slot is released when the wrapper returns.
+ * `exit(2)` must not be trapped: musl can unmap its stack before
+ * calling it. The exec commit path calls tawcroot_rescue_restore()
+ * and then replaces the process image (fresh BSS, whole table gone).
+ * A slot can leak across fork: a multi-threaded guest that forks while
+ * a sibling thread is mid-rescue leaves that sibling's slot claimed in
+ * the child. Bounded (one per concurrently-rescuing sibling per fork)
+ * and self-healing on tid reuse, since a claim first reclaims any slot
+ * already carrying our own tid. A full table just means no rescue for
+ * that call.
  */
 
 #include <stddef.h>
@@ -323,24 +329,22 @@ static long rescue_retry(struct rescue_slot *s,
 
 long tawcroot_rescue_open_in_view(const char *guest_path)
 {
-	/* Already inside a dispatch wrapper (exec_handler's probe opens):
-	 * that wrapper owns the slot and does the retry for the whole
-	 * handler. Claiming here would reset its recorded routes. */
-	if (slot_find()) return tawcroot_open_in_view(guest_path);
+	long rv = tawcroot_open_in_view(guest_path);
+	if (rv != TAWC_EACCES || tawcroot_identity_euid() != 0) return rv;
+	/* Already inside a rescue (an outer wrapper is recording or
+	 * retrying): that wrapper owns the slot and the retry. */
+	if (slot_find()) return rv;
 
 	int idx = slot_claim(current_tid());
-	if (idx < 0) return tawcroot_open_in_view(guest_path);
-
-	long rv = tawcroot_open_in_view(guest_path);
-	if (rv == TAWC_EACCES && tawcroot_identity_euid() == 0) {
-		struct rescue_slot *s = &g_slots[idx];
-		if (rescue_widen(s, 1)) {
-			s->frozen = 1;
-			rv = tawcroot_open_in_view(guest_path);
-			s->frozen = 0;
-		}
-		restore_slot(s);
+	if (idx < 0) return rv;
+	struct rescue_slot *s = &g_slots[idx];
+	rv = tawcroot_open_in_view(guest_path);   /* recording run */
+	if (rv == TAWC_EACCES && rescue_widen(s, 1)) {
+		s->frozen = 1;
+		rv = tawcroot_open_in_view(guest_path);
+		s->frozen = 0;
 	}
+	restore_slot(s);
 	slot_release(idx);
 	return rv;
 }
@@ -350,15 +354,17 @@ long tawcroot_dispatch_call(const tawcroot_syscall_args *args, ucontext_t *uc)
 	tawcroot_handler_fn fn = tawcroot_dispatch_get((int)args->nr);
 	if (!fn) return TAWC_ENOSYS;
 
-	int idx = slot_claim(current_tid());
-	if (idx < 0) return fn(args, uc);
-
 	long rv = fn(args, uc);
 	/* Virtual euid is only consulted here, on the cold path: a guest
 	 * that dropped privileges gets the real EACCES (same gate as the
 	 * fchmodat/fchownat fakes), and every other trap avoids the
 	 * identity seqlock read. */
-	if (rv == TAWC_EACCES && tawcroot_identity_euid() == 0)
+	if (rv != TAWC_EACCES || tawcroot_identity_euid() != 0) return rv;
+
+	int idx = slot_claim(current_tid());
+	if (idx < 0) return rv;
+	rv = fn(args, uc);   /* recording run */
+	if (rv == TAWC_EACCES)
 		rv = rescue_retry(&g_slots[idx], args, fn, uc, rv);
 	slot_release(idx);
 	return rv;

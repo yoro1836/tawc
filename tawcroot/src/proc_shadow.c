@@ -18,19 +18,34 @@
 #include "tawc_string.h"
 #include "tawc_uapi.h"
 
-/* Fast-out: does this guest-relative leaf even have a chance of
- * composing into a /proc/<x> path that we shadow? Legitimate first chars
- * are {b,c,s,t,m,e,l,u,v,digit} — covering "bus/" (pci/devices), "cwd",
- * "self/", "stat", "sys/", "task/", "maps", "exe", "loadavg", "uptime",
- * "version", and numeric "<tid>/" forms. Anything else (the vast
- * majority of fd-relative opens and stats — config files, dotfiles,
- * library names, etc.) skips the readlinkat. */
+/* Fast-out: can this fd-relative path compose into a /proc/<x> path we
+ * shadow or reverse-translate? Every such path ends in one of a few
+ * leaf names (or a numeric fd for /proc/<pid>/fd/<n>) whatever the
+ * dirfd, so test the last component. Library names, dotfiles and the
+ * rest of ordinary fd-relative traffic skip the readlinkat. */
 int tawcroot_could_be_proc_relative(const char *p)
 {
-	char c = p[0];
-	return c == 'b' || c == 'c' || c == 's' || c == 't' || c == 'm' ||
-	       c == 'e' || c == 'l' || c == 'u' || c == 'v' || c == 'n' ||
-	       (c >= '0' && c <= '9');
+	static const char *const leaves[] = {
+		"maps", "stat", "version", "uptime", "loadavg", "devices",
+		"tcp", "tcp6", "overflowuid", "overflowgid",
+		"exe", "cwd", "root",
+	};
+	const char *leaf = p;
+	for (const char *q = p; *q; q++)
+		if (*q == '/' && q[1]) leaf = q + 1;
+	size_t n = 0;
+	while (leaf[n] && leaf[n] != '/') n++;
+	if (n == 0) return 0;
+	int digits = 1;
+	for (size_t i = 0; i < n; i++)
+		if (leaf[i] < '0' || leaf[i] > '9') digits = 0;
+	if (digits) return 1;
+	for (size_t k = 0; k < sizeof leaves / sizeof leaves[0]; k++) {
+		size_t i = 0;
+		while (i < n && leaves[k][i] == leaf[i]) i++;
+		if (i == n && leaves[k][i] == 0) return 1;
+	}
+	return 0;
 }
 
 

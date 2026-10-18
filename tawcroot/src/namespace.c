@@ -9,6 +9,7 @@
 #include "dispatch.h"
 #include "errno_neg.h"
 #include "fdtab.h"
+#include "filter.h"
 #include "io.h"
 #include "raw_sys.h"
 #include "tawc_string.h"
@@ -24,9 +25,21 @@ int tawcroot_namespace_probe(const char *path)
         tawc_streq(path, "/proc/self/ns/pid") || tawc_streq(path, "/proc/self/ns/net");
 }
 
+/* write, getpid & co only have work once a fake namespace exists, so
+ * they stay out of the base filter (every guest write() would pay a
+ * SIGSYS otherwise) and get trapped by a stacked filter on first entry.
+ * Inherited across fork/exec, as is the namespace state that implies
+ * it, so "already active" means "already trapped". */
+static const int user_lazy[] = { TAWC_SYS_write };
+static const int pid_lazy[] = { TAWC_SYS_getpid, TAWC_SYS_getppid, __NR_kill, __NR_tgkill };
+
 static long new_user(void)
 {
     struct tawc_namespace *ns = &tawcroot_namespace;
+    if (!ns->user) {
+        long trapped = tawcroot_install_lazy_filter(user_lazy, sizeof user_lazy / sizeof user_lazy[0]);
+        if (trapped < 0) return trapped;
+    }
     /* Allocate before publishing user state. Descriptor allocation failures
      * must not appear to have successfully created a namespace. */
     int fds[3];
@@ -121,8 +134,14 @@ static long clone_namespace(const tawcroot_syscall_args *a, ucontext_t *uc)
     }
     long result = TAWC_RAW(TAWC_SYS_clone, flags & ~NS_FLAGS, 0, a->c, a->d, a->e, 0);
     if (!result) {
+        tawc_usercopy_refresh_pid();
         if (!(flags & CLONE_FS)) tawcroot_fs_detach();
-        if (flags & CLONE_NEWPID) tawcroot_namespace.init_pid = (int)tawc_getpid();
+        if (flags & CLONE_NEWPID) {
+            if (!tawcroot_namespace.init_pid &&
+                tawcroot_install_lazy_filter(pid_lazy, sizeof pid_lazy / sizeof pid_lazy[0]) < 0)
+                tawc_exit_group(125);
+            tawcroot_namespace.init_pid = (int)tawc_getpid();
+        }
         if ((flags & CLONE_NEWUSER) && new_user() < 0) tawc_exit_group(125);
         if (a->b) {
 #if defined(__aarch64__)
@@ -235,11 +254,11 @@ void tawcroot_namespace_register(void)
 {
     tawcroot_dispatch_install(TAWC_SYS_clone, clone_namespace);
     tawcroot_dispatch_install(TAWC_SYS_unshare, unshare_namespace);
-    tawcroot_dispatch_install(TAWC_SYS_getpid, namespace_pid);
-    tawcroot_dispatch_install(TAWC_SYS_getppid, namespace_pid);
+    tawcroot_dispatch_install_lazy(TAWC_SYS_getpid, namespace_pid);
+    tawcroot_dispatch_install_lazy(TAWC_SYS_getppid, namespace_pid);
     tawcroot_dispatch_install(__NR_capget, namespace_cap);
     tawcroot_dispatch_install(__NR_capset, namespace_cap);
-    tawcroot_dispatch_install(TAWC_SYS_write, namespace_write);
-    tawcroot_dispatch_install(__NR_kill, namespace_signal);
-    tawcroot_dispatch_install(__NR_tgkill, namespace_signal);
+    tawcroot_dispatch_install_lazy(TAWC_SYS_write, namespace_write);
+    tawcroot_dispatch_install_lazy(__NR_kill, namespace_signal);
+    tawcroot_dispatch_install_lazy(__NR_tgkill, namespace_signal);
 }

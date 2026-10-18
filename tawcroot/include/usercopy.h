@@ -5,7 +5,7 @@
  * a guest may pass a NULL or wild pointer to openat(), and the kernel's
  * contract is to return -EFAULT. A bare deref from the SIGSYS handler
  * would deliver SIGSEGV synchronously and tear down the process — so
- * we route through process_vm_readv against our own task id. The kernel
+ * we route through process_vm_readv against our own pid. The kernel
  * validates the address and returns -EFAULT without raising a signal.
  *
  * Two flavors:
@@ -33,9 +33,21 @@ long tawc_copy_string_from_guest(char *dst, size_t cap,
 long tawc_copy_from_guest(void *dst, size_t n, const void *guest_src);
 long tawc_copy_to_guest(void *guest_dst, const void *src, size_t n);
 
+/* One process_vm_readv of `n` guest ranges, packed into `dst`. The
+ * kernel stops at the first range that faults and reports the bytes
+ * copied before it, so callers learn how many leading ranges landed.
+ * Returns bytes copied or -errno. */
+struct iovec;
+long tawc_readv_from_guest(void *dst, const struct iovec *riov, int n);
+
 /* Init: probe process_vm_readv against our own task id; sets a static flag
  * tawc_usercopy_works. Call once at startup before installing the
  * filter. Returns 0 on success / -errno. */
 long tawc_usercopy_init(void);
+
+/* Re-cache our pid after a fork whose child is known to own a fresh VM
+ * (the trapped non-CLONE_VM clone). Without it the child still works,
+ * one gettid per copy slower. */
+void tawc_usercopy_refresh_pid(void);
 
 extern int tawc_usercopy_works;

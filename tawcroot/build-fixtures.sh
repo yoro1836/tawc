@@ -86,6 +86,14 @@ build_dynamic() {
     echo "  built $name (dynamic, bionic)"
 }
 
+# --- static C fixtures (libc.a via NDK) ---
+build_static_c() {
+    local name="$1"
+    local out="$OUT_DIR/$name"
+    "$CC" -static -O2 -Wl,--build-id=none "$PROG_DIR/${name}.c" -o "$out"
+    echo "  built $name (static, bionic)"
+}
+
 # --- dynamic fixture compiled with -fstack-clash-protection ---
 build_dynamic_big_stack() {
     local out="$OUT_DIR/dynamic_big_stack"
@@ -131,6 +139,7 @@ build_static  static_check_ids_exit42
 build_static  static_drop_ids_devnull_eperm
 build_static  static_link_publish_argv12
 build_static  static_mknod_chr_fake
+build_static_c static_namespace_check
 build_dynamic dynamic_exit42
 build_dynamic dynamic_argv_check
 build_dynamic dynamic_legacy_nr_probe

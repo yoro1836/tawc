@@ -47,6 +47,7 @@
 #include "linkstore.h"
 #include "loader_exec.h"
 #include "path.h"
+#include "pathcache.h"
 #include "proctitle.h"
 #include "raw_sys.h"
 #include "supervisor.h"
@@ -358,6 +359,9 @@ static void prod_rootfs_init(const char *rootfs,
 	 * runs per guest exec, and guests from OTHER sessions may still
 	 * hold live temps; see linkstore.h). */
 	tawcroot_linkstore_tmp_sweep();
+	/* Same rule for the path cache: changes made outside tawcroot
+	 * between sessions must not be served from it. */
+	tawcroot_pathcache_session_start();
 
 	/* PR_SET_NO_NEW_PRIVS is sticky: set once, inherited by every
 	 * fork+execve descendant including the --exec-child re-exec.

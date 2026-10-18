@@ -12,19 +12,27 @@ shared between handler routing and the allowlist. Program structure:
 ```
 load arch from seccomp_data (offset 4)
 if arch != AUDIT_ARCH_<our-arch>: KILL_PROCESS  // can't happen, defense in depth
-// cBPF is 32-bit — compare instruction_pointer in two halves
-load instruction_pointer[31:0] from seccomp_data (offset 8)
-if lo32 != lo32(&tawcroot_raw_syscall_ret): goto not_stub
-load instruction_pointer[63:32] from seccomp_data (offset 12)
-if hi32 == hi32(&tawcroot_raw_syscall_ret): ALLOW  // our stub
-not_stub:
 load syscall_nr from seccomp_data (offset 0)
-switch (syscall_nr):
-  case openat: TRAP
-  case stat: TRAP
-  ...
-  default: ALLOW
+binary search over the sorted trap set (+ rt_sigreturn):
+  not in set              → ALLOW
+  close, args[0] < 1000   → ALLOW   // closefrom fast path
+  clone with CLONE_VM     → ALLOW   // threads, vfork
+  otherwise               → JA ipcheck
+ipcheck:  // cBPF is 32-bit — compare instruction_pointer in two halves
+  load instruction_pointer[31:0]  (offset 8)
+  load instruction_pointer[63:32] (offset 12)
+  ip == &tawcroot_raw_syscall_ret → ALLOW   // our stub
+  else                            → TRAP
 ```
+
+**NR first, IP only for trap candidates.** An untrapped syscall is
+decided from arch + nr alone, so the kernel's seccomp action cache
+(5.11+) marks it constant-ALLOW and skips the filter entirely; older
+kernels still only walk ~8 compares (`LEAF_RUN` JEQ leaves under a
+JGE tree linked by 32-bit `JA`, so subtree size never limits jumps).
+`filter_build.c` sorts and de-duplicates the trap list itself.
+`test_filter.c::filter_untrapped_nr_reads_only_arch_and_nr` pins the
+cacheable shape.
 
 **Implementation note:** seccomp cBPF operates on 32-bit words.
 `seccomp_data.instruction_pointer` is a `__u64` at offset 8 (after
@@ -33,8 +41,17 @@ halves (offsets 8 and 12) and compare each. On aarch64 with base 0x2000000000 th
 are non-zero — a filter that only checks the low half would
 mis-ALLOW guest code at a coincidentally matching low address.
 
-That's ~45 BPF instructions, well within the kernel's filter
-limit.
+**Lazy traps.** Handlers registered with
+`tawcroot_dispatch_install_lazy` stay out of the base filter: `write`
+(uid_map emulation), `getpid`/`getppid`/`kill`/`tgkill` (PID
+namespace emulation) only have work once the guest creates a fake
+namespace. `namespace.c` then stacks a small second filter trapping
+just those (`tawcroot_install_lazy_filter`, `SECCOMP_FILTER_FLAG_TSYNC`
+because emulated `unshare` has no single-thread rule). Stacked
+filters only add TRAPs, are inherited across fork and the
+`--exec-child` re-exec, and the namespace state that implies them is
+inherited the same way, so "already active" means "already trapped".
+Covered by `test_prod_features.c::prod_lazy_namespace_traps`.
 
 Two filters are active: Android's existing `untrusted_app` filter
 (already loaded by zygote before we got control), plus our filter

@@ -11,12 +11,13 @@
  *
  * Shape: one wrapper at the dispatch call site
  * (`tawcroot_dispatch_call`, used by the SIGSYS handler and by the
- * hosted tests). The path translator drops each translated route
- * (base fd + suffix) into a per-thread rescue slot the wrapper owns.
- * When the handler returns -EACCES and the virtual euid is 0, the
- * wrapper widens the app-owned inodes along those routes, re-runs the
- * handler once, and restores the old modes in reverse order whatever
- * the result. New path handlers are covered without touching this
+ * hosted tests). When the handler returns -EACCES and the virtual
+ * euid is 0, the wrapper claims a per-thread rescue slot and re-runs
+ * the handler once while the path translator drops each translated
+ * route (base fd + suffix) into it; it then widens the app-owned
+ * inodes along those routes, re-runs the handler again, and restores
+ * the old modes in reverse order whatever the result. The happy path
+ * records nothing. New path handlers are covered without touching this
  * file; only the leaf-access table below is per-syscall.
  *
  * See notes/tawcroot/path-translation.md §"DAC override".

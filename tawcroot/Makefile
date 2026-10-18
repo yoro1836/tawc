@@ -150,6 +150,7 @@ PROD_C := \
     $(SRC_T)/src/path_fold.c \
     $(SRC_T)/src/path_orchestrate.c \
     $(SRC_T)/src/path_resolve.c \
+    $(SRC_T)/src/pathcache.c \
     $(SRC_T)/src/proc_rewrite.c \
     $(SRC_T)/src/proc_shadow.c \
     $(SRC_T)/src/identity.c \
@@ -307,6 +308,12 @@ $(OUT)/programs/static_exit42: $(SRC_TS)/integration/programs/static_exit42_x86_
 $(OUT)/programs/static_argc_random: $(SRC_TS)/integration/programs/static_argc_random_x86_64.S | $(OUT)
 	@mkdir -p $(dir $@)
 	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
+
+# static_namespace_check: static C (libc.a) — fake user/PID namespaces and
+# the lazily stacked write/getpid filter. See the source for exit codes.
+$(OUT)/programs/static_namespace_check: $(SRC_TS)/integration/programs/static_namespace_check.c | $(OUT)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -static -Wl,--build-id=none $< -o $@
 
 # dynamic_exit42: ET_DYN linked against the host's glibc. The phase
 # 2.5 smoke loads both this binary AND its PT_INTERP-pointed ld.so,

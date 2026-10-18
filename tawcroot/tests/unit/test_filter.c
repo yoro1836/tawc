@@ -8,7 +8,8 @@
  * The cBPF dialect we generate is a strict subset:
  *
  *   BPF_LD | BPF_W | BPF_ABS  (k = byte offset into seccomp_data)
- *   BPF_JMP | BPF_JEQ | BPF_K (jt / jf are pc-relative skip counts)
+ *   BPF_JMP | BPF_JEQ/JGE/JSET | BPF_K (jt / jf are pc-relative skips)
+ *   BPF_JMP | BPF_JA          (k = pc-relative skip)
  *   BPF_RET | BPF_K           (return action verbatim)
  *
  * The interpreter only knows these. Anything else returns a sentinel
@@ -53,11 +54,15 @@ struct test_seccomp_data {
 #define BPF_ERR_UNKNOWN_OP   0xfffffffeu
 #define BPF_ERR_RAN_OFF_END  0xffffffffu
 
+/* Bit k/4 set for every seccomp_data word the last run_filter loaded. */
+static uint32_t g_loaded;
+
 /* Tiny cBPF interpreter. Returns the program's RET k value, or one of
  * the sentinels above on error. */
 static uint32_t run_filter(const struct sock_filter *prog, size_t len,
 			   const struct test_seccomp_data *d)
 {
+	g_loaded = 0;
 	uint32_t A = 0;
 	size_t pc = 0;
 	const uint8_t *bytes = (const uint8_t *)d;
@@ -71,6 +76,7 @@ static uint32_t run_filter(const struct sock_filter *prog, size_t len,
 			uint32_t v;
 			memcpy(&v, bytes + ins.k, 4);
 			A = v;
+			g_loaded |= 1u << (ins.k / 4);
 			pc++;
 			break;
 		}
@@ -86,6 +92,9 @@ static uint32_t run_filter(const struct sock_filter *prog, size_t len,
 			pc += 1 + (size_t)((A & ins.k) ? ins.jt : ins.jf);
 			break;
 		}
+		case BPF_JMP | BPF_JA:
+			pc += 1 + (size_t)ins.k;
+			break;
 		case BPF_RET | BPF_K:
 			return ins.k;
 		default:
@@ -420,6 +429,78 @@ test(filter_fork_traps_but_shared_vm_stack_switch_does_not)
 	test_int_eq(build_and_run(traps, 2, STUB_ADDR, 0, TEST_AUDIT_ARCH, &d), SECCOMP_RET_TRAP);
 	d.args[0] = CLONE_VM | CLONE_FS | CLONE_THREAD;
 	test_int_eq(build_and_run(traps, 2, STUB_ADDR, 0, TEST_AUDIT_ARCH, &d), SECCOMP_RET_ALLOW);
+	d.nr = TAWC_SYS_openat;
+	test_int_eq(build_and_run(traps, 2, STUB_ADDR, 0, TEST_AUDIT_ARCH, &d), SECCOMP_RET_TRAP);
+}
+
+/* ---------------- search tree at production scale ---------------- */
+
+test(filter_large_set_routes_every_nr)
+{
+	/* 160 scattered NRs, given out of order: every one traps from
+	 * guest code and is allowed from the stub, and every NR in between
+	 * is allowed. Covers the JA-linked binary search at a size where
+	 * plain jt/jf offsets would overflow. */
+	int traps[160];
+	for (int k = 0; k < 160; k++) traps[k] = (k * 37) % 160 * 3 + 1;
+	static struct sock_filter prog[4096];
+	long n = tawcroot_build_filter(prog, 4096, traps, 160, STUB_ADDR, 0,
+				       TEST_AUDIT_ARCH);
+	test_true(n > 0);
+	for (int nr = 0; nr < 500; nr++) {
+		int trapped = nr % 3 == 1 && nr < 480;
+		if (nr == TAWC_SYS_rt_sigreturn) trapped = 1;
+		struct test_seccomp_data d = {
+			.nr = nr, .arch = TEST_AUDIT_ARCH,
+			.instruction_pointer = OUT_OF_STUB,
+		};
+		uint32_t want = trapped ? SECCOMP_RET_TRAP : SECCOMP_RET_ALLOW;
+		test_int_eq(run_filter(prog, (size_t)n, &d), want);
+		d.instruction_pointer = STUB_ADDR;
+		test_int_eq(run_filter(prog, (size_t)n, &d), SECCOMP_RET_ALLOW);
+	}
+}
+
+test(filter_untrapped_nr_reads_only_arch_and_nr)
+{
+	/* The kernel's seccomp action cache can only mark an NR always-
+	 * ALLOW when the filter decides it from arch + nr alone. Loading
+	 * the IP (offsets 8/12) or args before the NR test defeats it. */
+	int traps[] = { TAWC_SYS_openat, TAWC_SYS_close, TAWC_SYS_clone,
+			TAWC_SYS_fstatat };
+	static struct sock_filter prog[4096];
+	long n = tawcroot_build_filter(prog, 4096, traps, 4, STUB_ADDR, 1000,
+				       TEST_AUDIT_ARCH);
+	test_true(n > 0);
+	struct test_seccomp_data d = {
+		.nr = 400, .arch = TEST_AUDIT_ARCH,   /* in none of the sets */
+		.instruction_pointer = OUT_OF_STUB,
+	};
+	test_int_eq(run_filter(prog, (size_t)n, &d), SECCOMP_RET_ALLOW);
+	test_int_eq(g_loaded, 0x3u);  /* words 0 (nr) and 1 (arch) */
+}
+
+test(filter_sigprocmask_traps_only_mask_growth)
+{
+	int traps[] = { TAWC_SYS_rt_sigprocmask, TAWC_SYS_openat };
+	struct test_seccomp_data d = {
+		.nr = TAWC_SYS_rt_sigprocmask, .arch = TEST_AUDIT_ARCH,
+		.instruction_pointer = OUT_OF_STUB,
+	};
+	/* SIG_BLOCK / SIG_SETMASK with a set: trap. */
+	d.args[0] = 0; d.args[1] = 0x7ffc00001000ULL;
+	test_int_eq(build_and_run(traps, 2, STUB_ADDR, 0, TEST_AUDIT_ARCH, &d), SECCOMP_RET_TRAP);
+	d.args[0] = 2;
+	test_int_eq(build_and_run(traps, 2, STUB_ADDR, 0, TEST_AUDIT_ARCH, &d), SECCOMP_RET_TRAP);
+	/* A set pointer whose low word is 0 is still a set. */
+	d.args[1] = 0x100000000ULL;
+	test_int_eq(build_and_run(traps, 2, STUB_ADDR, 0, TEST_AUDIT_ARCH, &d), SECCOMP_RET_TRAP);
+	/* SIG_UNBLOCK, and queries, run natively. */
+	d.args[0] = 1; d.args[1] = 0x7ffc00001000ULL;
+	test_int_eq(build_and_run(traps, 2, STUB_ADDR, 0, TEST_AUDIT_ARCH, &d), SECCOMP_RET_ALLOW);
+	d.args[0] = 0; d.args[1] = 0;
+	test_int_eq(build_and_run(traps, 2, STUB_ADDR, 0, TEST_AUDIT_ARCH, &d), SECCOMP_RET_ALLOW);
+	/* The following NR still routes. */
 	d.nr = TAWC_SYS_openat;
 	test_int_eq(build_and_run(traps, 2, STUB_ADDR, 0, TEST_AUDIT_ARCH, &d), SECCOMP_RET_TRAP);
 }

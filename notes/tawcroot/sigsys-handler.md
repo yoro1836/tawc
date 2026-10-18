@@ -65,7 +65,8 @@ handler, and — only when the handler returns `-EACCES` at virtual euid
 0 — widens the app-owned inodes along the routes the translator
 recorded and re-runs the handler once. See
 notes/tawcroot/path-translation.md §"DAC override"; on every other
-outcome it is the table lookup plus a `gettid` and a CAS.
+outcome it is the bare table lookup: routes are only recorded, by
+re-running the handler once, after a first run returned `-EACCES`.
 
 ### Guest memory access
 
@@ -99,6 +100,18 @@ isn't worth it for a case production never hits. If a real fallback is
 ever needed (sandboxed hosts), prefer the pipe trick — `write(pipe_wr,
 guest_src, n)` gets kernel address validation with clean `-EFAULT` and
 partial counts, reading back completes the copy — over signal games.
+
+Cost: one syscall per copy. The pid passed to `process_vm_*` is the
+tgid (any thread of the group addresses the shared VM), cached on a
+`MADV_WIPEONFORK` page: a forked child reads 0 and falls back to a
+per-call `gettid` until the trapped-clone child path refills it
+(`tawc_usercopy_refresh_pid`). Never refill lazily on a 0 read — a
+vfork child shares the page and would leave its own pid behind after
+its execve. A zombie leader (main thread exited, siblings alive)
+returns `-ESRCH`, which retries by tid. String reads take 512-byte
+chunks split into two remote iovecs at the 4 KiB boundary, so a
+string ending just before an unmapped page comes back as a partial
+read instead of `-EFAULT` for the whole chunk.
 
 These helpers are used for:
 

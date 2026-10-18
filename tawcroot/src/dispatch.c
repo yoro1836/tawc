@@ -22,6 +22,7 @@
 #include "syscalls_socket.h"
 
 static tawcroot_handler_fn g_dispatch[TAWCROOT_DISPATCH_MAX];
+static unsigned char       g_lazy[TAWCROOT_DISPATCH_MAX];
 void tawcroot_sysv_sem_register(void);
 void tawcroot_sysv_shm_register(void);
 
@@ -64,6 +65,12 @@ void tawcroot_dispatch_install(int nr, tawcroot_handler_fn fn)
 	g_dispatch[nr] = fn;
 }
 
+void tawcroot_dispatch_install_lazy(int nr, tawcroot_handler_fn fn)
+{
+	tawcroot_dispatch_install(nr, fn);
+	g_lazy[nr] = 1;
+}
+
 tawcroot_handler_fn tawcroot_dispatch_get(int nr)
 {
 	if (nr < 0 || nr >= TAWCROOT_DISPATCH_MAX) return 0;
@@ -88,7 +95,7 @@ size_t tawcroot_dispatch_trap_list(int *out, size_t out_cap)
 {
 	size_t n = 0;
 	for (int nr = 0; nr < TAWCROOT_DISPATCH_MAX; nr++) {
-		if (!g_dispatch[nr]) continue;
+		if (!g_dispatch[nr] || g_lazy[nr]) continue;
 		if (n < out_cap) out[n] = nr;
 		n++;
 	}

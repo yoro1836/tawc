@@ -43,6 +43,7 @@
 #include "io.h"
 #include "linkstore.h"
 #include "path.h"
+#include "pathcache.h"
 #include "path_scratch.h"
 #include "proc_shadow.h"
 #include "raw_sys.h"
@@ -580,7 +581,8 @@ static long handle_newfstatat(const tawcroot_syscall_args *args,
 			long rv = TAWC_RAW(TAWC_SYS_fstatat, dirfd, (long)"",
 					   (long)&local, flags, 0, 0);
 			if (rv == 0) {
-				int pad = tawcroot_gamepad_fd_slot(dirfd);
+				int pad = S_ISSOCK(local.st_mode)
+					? tawcroot_gamepad_fd_slot(dirfd) : -1;
 				if (pad >= 0) tawcroot_gamepad_stat(&local, pad);
 				unsigned long c = fd_object_nlink(
 					dirfd, local.st_mode, local.st_nlink,
@@ -1346,10 +1348,15 @@ static long handle_unlinkat(const tawcroot_syscall_args *args, ucontext_t *uc)
 		char tok[TAWCROOT_LINK_TOKEN_MAX];
 		if (tawcroot_link_leaf_token(t.fd, t.path, tok,
 					     sizeof tok) == 1 &&
-		    tawcroot_linkstore_state() == TAWCROOT_STORE_READY)
-			return tawcroot_link_del(tok, t.fd, t.path);
+		    tawcroot_linkstore_state() == TAWCROOT_STORE_READY) {
+			long rv = tawcroot_link_del(tok, t.fd, t.path);
+			tawcroot_pathcache_mutated(t.fd, t.path);
+			return rv;
+		}
 	}
-	return TAWC_RAW(TAWC_SYS_unlinkat, t.fd, (long)t.path, flag, 0, 0, 0);
+	long rv = TAWC_RAW(TAWC_SYS_unlinkat, t.fd, (long)t.path, flag, 0, 0, 0);
+	tawcroot_pathcache_mutated(t.fd, t.path);
+	return rv;
 }
 
 /* utimensat: translate path and pass through. Two special cases:
@@ -1728,7 +1735,9 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 			long rv = TAWC_RAW(TAWC_SYS_statx, dirfd, (long)"", flags,
 					   mask, (long)&local, 0);
 			if (rv == 0) {
-				int pad = tawcroot_gamepad_fd_slot(dirfd);
+				int sock = !(local.stx_mask & 0x1u /*STATX_TYPE*/)
+					|| S_ISSOCK(local.stx_mode);
+				int pad = sock ? tawcroot_gamepad_fd_slot(dirfd) : -1;
 				if (pad >= 0) {
 					local.stx_mode = S_IFCHR | 0600;
 					local.stx_rdev_major = 13;
@@ -1868,7 +1877,8 @@ static long handle_fstat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	struct stat local;
 	long rv = TAWC_RAW(TAWC_SYS_fstat, fd, (long)&local, 0, 0, 0, 0);
 	if (rv == 0) {
-		int pad = tawcroot_gamepad_fd_slot(fd);
+		int pad = S_ISSOCK(local.st_mode)
+			? tawcroot_gamepad_fd_slot(fd) : -1;
 		if (pad >= 0) tawcroot_gamepad_stat(&local, pad);
 		unsigned long c = fd_object_nlink(fd, local.st_mode,
 						  local.st_nlink,
@@ -2191,7 +2201,7 @@ static long linkat_empty_path(struct tawcroot_path_scratch *scratch,
  *      out of link/, dangling the whole cluster.
  *   3. Otherwise host linkat first; only EACCES/EPERM engages the
  *      emulation, and a directory source keeps the kernel's EPERM. */
-static long handle_linkat(const tawcroot_syscall_args *args, ucontext_t *uc)
+static long linkat_impl(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
 	int          olddirfd = (int)args->a;
@@ -2375,6 +2385,16 @@ static long handle_linkat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	}
 }
 
+/* linkat can turn its source into an emulated-hardlink symlink by
+ * many routes (linkstore.h), so drop the whole path cache after any
+ * attempt rather than track each. linkat is rare next to lookups. */
+static long handle_linkat(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	long rv = linkat_impl(args, uc);
+	tawcroot_pathcache_mutated(tawcroot_rootfs_fd, "");
+	return rv;
+}
+
 /* renameat2 — translate both operands; old is PARENT_REMOVE, new is
  * PARENT_CREATE. The kernel takes (olddirfd, oldpath, newdirfd, newpath,
  * flags); when the guest passes non-AT_FDCWD dirfds with relative paths
@@ -2382,6 +2402,15 @@ static long handle_linkat(const tawcroot_syscall_args *args, ucontext_t *uc)
  * Both renameat and renameat2 funnel through here — renameat just passes
  * flags=0 to the kernel renameat2 (the latter is a strict superset and
  * present on every kernel we target). */
+/* Both names change: the source goes away, the destination is
+ * replaced (or swapped in, for RENAME_EXCHANGE). */
+static void rename_mutated(const struct fs_path *told,
+			   const struct fs_path *tnew)
+{
+	tawcroot_pathcache_mutated(told->fd, told->path);
+	tawcroot_pathcache_mutated(tnew->fd, tnew->path);
+}
+
 static long do_renameat(int olddirfd, const char *oldpath,
 			int newdirfd, const char *newpath,
 			unsigned int rflags)
@@ -2423,16 +2452,21 @@ static long do_renameat(int olddirfd, const char *oldpath,
 			    tawc_streq(otok, ntok))
 				return 0;
 			if (tawcroot_linkstore_state()
-			    == TAWCROOT_STORE_READY)
-				return tawcroot_link_clobber(
+			    == TAWCROOT_STORE_READY) {
+				long rv = tawcroot_link_clobber(
 					told.fd, told.path,
 					tnew.fd, tnew.path, rflags);
+				rename_mutated(&told, &tnew);
+				return rv;
+			}
 			/* Non-READY store: plain rename below — the
 			 * clobbered object leaks (overcount, safe). */
 		}
 	}
-	return TAWC_RAW(TAWC_SYS_renameat2, told.fd, (long)told.path,
-			tnew.fd, (long)tnew.path, rflags, 0);
+	long rv = TAWC_RAW(TAWC_SYS_renameat2, told.fd, (long)told.path,
+			   tnew.fd, (long)tnew.path, rflags, 0);
+	rename_mutated(&told, &tnew);
+	return rv;
 }
 
 static long handle_renameat2(const tawcroot_syscall_args *args,
