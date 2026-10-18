@@ -608,19 +608,28 @@ for hot guest syscall sites:
   `[anon:tawcroot-fastpath]`, within branch range of the site.
 - A stub (`src/arch/aarch64_fastpath.S`) saves every register the
   kernel would preserve (x1–x30, NZCV, caller-saved SIMD), calls
-  `tawcroot_fast_entry`, which blocks signals like the SIGSYS handler's
-  `sa_mask`, runs `tawcroot_dispatch_call(args, NULL)`, restores the
-  mask, and returns to site+4.
+  `tawcroot_fast_entry`, which runs `tawcroot_dispatch_call(args, NULL)`
+  and returns to site+4.
+- Signals: the SIGSYS handler's `sa_mask` blocks everything, so no
+  guest handler can interrupt (or `siglongjmp` out of) a translation
+  holding scratch slots or seqlock writes. The direct call blocks the
+  same way, but only once the process has installed a guest handler
+  (`handle_rt_sigaction` reports every non-default, non-ignore
+  handler; the flag is sticky so a vfork child's reset cannot clear
+  what the parent still has, and exec starts a fresh runtime). Before
+  that every disposition is default or ignore and no guest code can
+  run mid-call, so the two `rt_sigprocmask` calls are skipped — the
+  common case for CLI tools.
 - SVC and B are both architecturally safe to replace while another
   thread executes them; the stub is written and flushed first.
 
-S24, shell domain, `run-macro-shell.sh --rounds 5`: `stat_many` 0.90,
-`tar` 0.92, `find`/`ls -lR` 0.94, `grep -r` 0.96; spawn-heavy loops
-unchanged (short processes end before sites reach the threshold).
-`TAWCROOT_FASTPATH=2` skips the two `rt_sigprocmask` calls and shows the
-ceiling (0.85–0.95) but is not reentrancy-safe: a guest signal handler
-could interrupt a seqlock writer. Removing the mask safely needs
-deferred delivery for guest handlers.
+S24, shell domain: with the unconditional mask, `stat_many` 0.90,
+`tar` 0.92, `find`/`ls -lR` 0.94, `grep -r` 0.96 against the default
+build; skipping the mask until a handler exists takes a further
+0.90–0.93 off stat/find/ls/tar (`tawcroot/perf/results.md`).
+Spawn-heavy loops are unchanged (short processes end before sites reach
+the threshold). `TAWCROOT_FASTPATH=2` never masks: the ceiling, and not
+reentrancy-safe once a guest handler exists.
 
 Verified: all device tests pass with it on; `run-as` (app uid,
 `runas_app`, no app seccomp filter) patches and matches the default
