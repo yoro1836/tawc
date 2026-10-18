@@ -1,5 +1,5 @@
 /* x86_64 twin of static_svc_regs_preserved_aarch64.S: exit 42 iff
- * getuid, 64 times from one site, preserves every register the syscall
+ * getuid, 256 times from one site, preserves every register the syscall
  * ABI keeps (all but rax, rcx, r11). Failure: 100+i for the i-th
  * register in rbx rdx rsi rdi rbp r8 r9 r10 r12 r13 r14.
  */
@@ -8,7 +8,7 @@
 	.globl _start
 	.type  _start, %function
 _start:
-	movl    $64, %r15d
+	movl    $256, %r15d
 .Lloop:
 	movabsq $0xa5a5000000001000, %rbx
 	movabsq $0xa5a5000000001001, %rdx

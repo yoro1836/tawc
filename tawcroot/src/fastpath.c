@@ -1,5 +1,5 @@
-/* Experimental SIGSYS bypass by rewriting guest syscall sites
- * (include/fastpath.h). Built only with -DTAWCROOT_FASTPATH on aarch64.
+/* SIGSYS bypass by rewriting guest syscall sites (include/fastpath.h).
+ * aarch64 only; off with -DTAWCROOT_FASTPATH=0.
  *
  * Patch protocol, run inside the SIGSYS handler (all signals blocked)
  * under one global flag:
@@ -18,7 +18,9 @@
  * with their library.
  */
 
-#if defined(TAWCROOT_FASTPATH) && defined(__aarch64__)
+#include "fastpath_config.h"
+
+#if defined(__aarch64__) && TAWCROOT_FASTPATH
 
 #include <stddef.h>
 #include <stdint.h>
@@ -43,7 +45,7 @@
 #endif
 
 #define FP_SITES       4096
-#define FP_MIN_TRAPS   4
+#define FP_MIN_TRAPS   64
 #define FP_REGION      (64 * 1024)
 #define FP_REGIONS     64
 #define FP_STUB        32

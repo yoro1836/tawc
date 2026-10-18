@@ -452,6 +452,9 @@ build_tests() {
         "${programs_defines[@]}"
         -DTAWCROOT_ANDROID_FILTER_WRAP="\"$on_device/programs/wrap\""
         -DTAWCROOT_TEST_TMPDIR="\"$test_tmpdir\""
+        # Handlers run in-process over the hosted syscall shim; site
+        # rewriting (and its asm) belongs to the prod runtime only.
+        -DTAWCROOT_FASTPATH=0
     )
 
     local cleat_srcs=(

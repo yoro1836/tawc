@@ -174,9 +174,9 @@ return. Reinstall the production runtime afterwards.
 Without the app: after `run-macro-shell.sh` has extracted its rootfs,
 `trap-stats.py --shell <stats-built libtawcroot.so>` runs the same
 workloads from the adb shell domain (nothing is installed or launched;
-the binary and stats file are removed afterwards). With
-`TAWCROOT_FASTPATH` on, rewritten sites bypass the SIGSYS handler and
-are not counted, so profile the default build.
+the binary and stats file are removed afterwards). Stats builds
+turn `TAWCROOT_FASTPATH` off: rewritten sites would bypass the SIGSYS
+handler and go uncounted.
 
 ## Local competitor tools
 

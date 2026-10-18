@@ -1,4 +1,5 @@
-/* Experimental SIGSYS bypass (TAWCROOT_FASTPATH builds only, aarch64).
+/* SIGSYS bypass for aarch64 (on unless built with
+ * -DTAWCROOT_FASTPATH=0; see fastpath_config.h).
  *
  * A guest syscall site that keeps trapping for a uc-free handler is
  * rewritten from `svc #0` to a `b` into a per-site stub, which calls
@@ -19,8 +20,9 @@
 #include <ucontext.h>
 
 #include "dispatch.h"
+#include "fastpath_config.h"
 
-#if defined(TAWCROOT_FASTPATH) && defined(__aarch64__)
+#if defined(__aarch64__) && TAWCROOT_FASTPATH
 /* Called from the SIGSYS handler after a trap was dispatched. */
 void tawcroot_fastpath_note(const tawcroot_syscall_args *args, ucontext_t *uc);
 /* rt_sigaction installed `handler` for a guest signal. Sticky: a vfork

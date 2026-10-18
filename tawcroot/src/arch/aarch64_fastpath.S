@@ -7,7 +7,9 @@
  * SIMD registers (the C code is not built general-regs-only).
  */
 
-#ifdef TAWCROOT_FASTPATH
+#include "fastpath_config.h"
+
+#if TAWCROOT_FASTPATH
 
 	.text
 

@@ -1,4 +1,4 @@
-/* Exit 42 iff a trapped syscall (getuid, 64 times from one site) leaves
+/* Exit 42 iff a trapped syscall (getuid, 256 times from one site) leaves
  * every register but x0 untouched: x1-x30, NZCV and all of v0-v31.
  * Repeating the site lets a fastpath build (src/fastpath.c) rewrite it
  * part way, so both the SIGSYS and the direct path are checked.
@@ -9,7 +9,7 @@
 	.globl _start
 	.type  _start, %function
 _start:
-	mov     x28, #64
+	mov     x28, #256
 .Lloop:
 	mov     x0, #23040
 	movk    x0, #0xc3c3, lsl #48

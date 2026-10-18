@@ -549,3 +549,33 @@ for part of it), medians of per-round medians. "Before" is the
 | `ls -lR` | 2.07× | 1.76× | 1.51× |
 | `tar cf` | 1.78× | 1.57× | 1.35× |
 | `grep -r` | 1.48× | 1.34× | 1.36× |
+
+## 2026-10-19 fastpath in the app domain; patch threshold; on by default
+
+Installed dev app (`untrusted_app_34`, app seccomp filter), `macro.sh
+--runs 7 --cpu 9`, 3 rounds alternating APKs: default build `d745d0e`
+vs `TAWCROOT_FASTPATH=1` at `2573c40` (threshold 4). Medians of round
+medians:
+
+| Workload | Default | Fastpath | Ratio |
+| --- | ---: | ---: | ---: |
+| `ls_lR_usr_lib` | 30 ms | 25 ms | 0.83 |
+| `find_usr` | 45 ms | 38 ms | 0.84 |
+| `stat_many` | 29 ms | 26 ms | 0.90 |
+| `tar_usr_share` | 138 ms | 125 ms | 0.91 |
+| `pacman_Qk` | 183 ms | 166 ms | 0.91 |
+| `grep_tree` | 120 ms | 117 ms | 0.975 |
+| `spawn_true_x100` | 207 ms | 217 ms | 1.05 |
+| `bash_startup_x50` | 145 ms | 151 ms | 1.04 |
+
+Outputs (find/ls -lR/stat/tar hashes, id, pacman -Qk) matched between
+the two builds; no AVC denials. The spawn regression is the per-process
+first-patch cost at threshold 4. Shell domain, 4 rounds × 9 runs vs the
+default build:
+
+| Threshold | `find_usr` | `ls_lR_usr_lib` | `true` ×100 | bash ×50 |
+| --- | ---: | ---: | ---: | ---: |
+| 4 | 0.83 | 0.87 | 1.04 | 1.06 |
+| 64 | 0.82 | 0.87 | 1.00 | 0.99 |
+
+Threshold 64 is now the default, and the fastpath is on for aarch64.

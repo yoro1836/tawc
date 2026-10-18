@@ -588,16 +588,17 @@ Refactored conventions every fs-handler follows (June 2026 cleanup):
   fd-relative composition; `hosted_proc_shadow_open_stat_lockstep`
   fails CI if a new kind lands on only one surface.
 
-### Experimental site rewriting (`TAWCROOT_FASTPATH`)
+### Syscall-site rewriting (`TAWCROOT_FASTPATH`)
 
-Off by default; build with `EXTRA_CFLAGS=-DTAWCROOT_FASTPATH=1
-tawcroot/build.sh --abi=aarch64`. `src/fastpath.c` skips signal delivery
-for hot guest syscall sites:
+On by default for aarch64 (`include/fastpath_config.h`); build with
+`EXTRA_CFLAGS=-DTAWCROOT_FASTPATH=0` to turn it off. Stats builds and the
+in-process tests orchestrator build it off. `src/fastpath.c` skips signal
+delivery for hot guest syscall sites:
 
 - After the SIGSYS handler dispatches a trap whose nr is on a uc-free
   allowlist (identity getters, `openat`, `close`, the stat family,
   `readlinkat`, `faccessat{,2}`, `getdents64`, `getcwd`), it counts the
-  site. On the 4th trap it rewrites the `svc #0` into `b stub` when the
+  site. On the 64th trap it rewrites the `svc #0` into `b stub` when the
   instruction before it is `mov {w,x}8, #nr` with the same nr. The nr at
   a patched site is then static, so `clone`, `rt_sigreturn` and the like
   can never be routed through it.
@@ -631,9 +632,15 @@ Spawn-heavy loops are unchanged (short processes end before sites reach
 the threshold). `TAWCROOT_FASTPATH=2` never masks: the ceiling, and not
 reentrancy-safe once a guest handler exists.
 
-Verified: all device tests pass with it on; `run-as` (app uid,
-`runas_app`, no app seccomp filter) patches and matches the default
-build with no AVC denials. Not yet run in `untrusted_app_34` with the
-app's seccomp filter. `prod_rootfs_trapped_svc_preserves_registers`
-checks register preservation across the rewrite (it catches a lost NZCV;
-getuid's path does not touch SIMD, so it cannot catch lost q regs).
+The threshold is 64 because every process pays a first patch (a
+`/proc/self/maps` read, two `mprotect`s, a COW page, a stub region):
+at 4, ld.so's library `openat` site was patched in every short-lived
+process and `true` ×100 / bash startup ran 4–6% slower; at 64 they are
+unchanged and long walks keep the gain.
+
+Verified in the app (`untrusted_app_34`, the app seccomp filter): sites
+patch, results match the non-rewriting build, no AVC denials, and a
+bash `trap` handler still runs. `prod_rootfs_trapped_svc_preserves_registers`
+checks register preservation across the rewrite (256 calls from one
+site; it catches a lost NZCV; getuid's path does not touch SIMD, so it
+cannot catch lost q regs).
