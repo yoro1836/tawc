@@ -145,7 +145,13 @@ tawcroot/perf/run-macro-shell.sh --cleanup   # remove the rootfs
 ```
 
 The rootfs stays on the device between runs (pass `--rootfs-tar` only
-the first time). Shell domain lacks the app's SELinux/seccomp context,
+the first time).
+
+For small user-space changes, `run-insn-ab.sh BASE.so CAND.so` compares
+`simpleperf stat -e instructions:u` over the same workloads. Instruction
+counts repeat to ~0.01% even when a busy or dozing phone swings wall
+time 2-3×, but they cover guest + tawcroot user mode only: syscall-count
+and kernel-path changes still need wall time. Shell domain lacks the app's SELinux/seccomp context,
 so compare runtimes with it, not absolute app numbers.
 
 ## Where real workloads spend their time
