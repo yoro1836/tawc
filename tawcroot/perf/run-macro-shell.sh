@@ -90,7 +90,7 @@ while IFS="|" read -r name cmd; do
         ts+=($(( (t1 - t0) / 1000 )))
     done
     sorted=($(printf "%s\n" "${ts[@]}" | sort -n))
-    printf "MACRO\t%s\t%s\n" "$name" "${sorted[$((runs / 2))]}"
+    printf "MACRO\t%s\t%s\t%s\n" "$name" "${sorted[$((runs / 2))]}" "${sorted[0]}"
 done < /tmp/tawc-macro-workloads
 EOF
 )
@@ -104,7 +104,7 @@ adb push -q "$WORK_HOST/macro-guest.sh" "$ROOT/tmp/tawc-macro.sh"
 # toybox taskset takes a hex mask, not -c.
 MASK=$(printf '%x' $((1 << CPU)))
 OUT="$WORK_HOST/macro-shell-$(date +%Y%m%d-%H%M%S).tsv"
-printf 'runtime\tround\tworkload\tmedian_ms\n' >"$OUT"
+printf 'runtime\tround\tworkload\tmedian_ms\tmin_ms\n' >"$OUT"
 for ((r = 1; r <= ROUNDS; r++)); do
     # Alternate which runtime goes first each round.
     order="base cand"; (( r % 2 == 0 )) && order="cand base"
@@ -114,7 +114,7 @@ for ((r = 1; r <= ROUNDS; r++)); do
                    -b /dev:/dev -b /proc:/proc -b /sys:/sys -- \
                    /usr/bin/env -i PATH=/usr/bin:/bin HOME=/root LANG=C \
                    /usr/bin/bash /tmp/tawc-macro.sh $RUNS" | tr -d '\r' |
-            awk -F'\t' -v b="$b" -v r="$r" '$1 == "MACRO" { print b "\t" r "\t" $2 "\t" $3 }' >>"$OUT"
+            awk -F'\t' -v b="$b" -v r="$r" '$1 == "MACRO" { print b "\t" r "\t" $2 "\t" $3 "\t" $4 }' >>"$OUT"
     done
 done
 
@@ -123,13 +123,19 @@ python3 - "$OUT" <<'PY'
 import sys, statistics, collections
 rows = [l.rstrip('\n').split('\t') for l in open(sys.argv[1])][1:]
 d = collections.defaultdict(lambda: collections.defaultdict(list))
+lo = collections.defaultdict(lambda: collections.defaultdict(list))
 order = []
-for b, r, w, ms in rows:
+for b, r, w, ms, mn in rows:
     if w not in order: order.append(w)
     d[w][b].append(int(ms))
-print(f"{'workload':18} {'base ms':>16} {'cand ms':>16} {'cand/base':>9}")
+    lo[w][b].append(int(mn))
+# min: fastest single run per side, robust to background load and
+# frequency drops on a phone in use or dozing.
+print(f"{'workload':18} {'base ms':>16} {'cand ms':>16} {'median':>7} {'min':>7}")
 for w in order:
     b, c = d[w]['base'], d[w]['cand']
     if b and c:
-        print(f"{w:18} {str(sorted(b)):>16} {str(sorted(c)):>16} {statistics.median(c) / statistics.median(b):9.3f}")
+        print(f"{w:18} {str(sorted(b)):>16} {str(sorted(c)):>16}"
+              f" {statistics.median(c) / statistics.median(b):7.3f}"
+              f" {min(lo[w]['cand']) / min(lo[w]['base']):7.3f}")
 PY
