@@ -311,3 +311,31 @@ recording, an `EACCES` from execve's terminal re-exec re-ran the whole
 handler twice more. exec is now excluded from the dispatch-level rescue
 and its guest-path opens rescue individually (see
 notes/tawcroot/path-translation.md §"DAC override").
+
+## 2026-10-18 where app-domain workloads spend time (trap-stats.py)
+
+S24, Arch in the dev app, `-DTAWCROOT_STATS` runtime built from e300080,
+`trap-stats.py --cpu 9`, broker fixed cost (`empty`) subtracted. Handler
+time excludes SIGSYS delivery/return (~0.9 µs per trap on this device).
+
+| Workload | Wall | Traps | Handler | Inner syscalls/trap (main traps) | /proc/self/fd readlinks |
+| --- | ---: | ---: | ---: | --- | ---: |
+| `find /usr` | 65 ms | 10,083 | 44 ms | fstatat 6.1 | 4,187 (dirfd lift 4,168) |
+| `ls -lR /usr/lib` | 35 ms | 4,713 | 23 ms | statx ~2.5 | 16 |
+| `grep -r` | 171 ms | 17,590 | 96 ms | openat 3.4, fstatat 6.3, fstat 3.4 | 14,770 (lift 9,155, fstat nlink 5,596) |
+| `tar cf` | 219 ms | 25,548 | 132 ms | fstatat 5.0, openat 3.4, fstat 3.3 | 23,242 (lift 13,352, fstat nlink 9,856) |
+| `pacman -Qk` | 194 ms | 36,755 | 116 ms | fstatat 3.2 | ~0 (path cache 81% hits) |
+| `true` ×100 | 156 ms | 3,500 | 56 ms | — | — |
+
+Path cache hit rate is 98–99% except first-visit paths (pacman 81%).
+Handler time is the larger share of tawcroot overhead in metadata-heavy
+work (55–70% of wall), not SIGSYS delivery. Per trap the handler issues
+3–6 syscalls of its own, each roughly 1 µs or more on this kernel:
+`/proc/self/fd/N` readlinks (dirfd-relative path lifting and the fstat
+link-object probe in `fd_object_nlink`), and `process_vm_readv/writev`
+guest copies.
+
+Per spawned process (`true` loop): --exec-child init ≈ 220 µs — bind
+table rebuild 64 µs, guest binary open/map 33 µs, shm/link store/path
+cache 30 µs, ld.so map 27 µs, root fd/usercopy 21 µs, the rest ~40 µs;
+~52 minor faults. Exec prepare in the parent ≈ 100 µs.
