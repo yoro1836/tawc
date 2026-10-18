@@ -151,6 +151,7 @@ PROD_C := \
     $(SRC_T)/src/path_orchestrate.c \
     $(SRC_T)/src/path_resolve.c \
     $(SRC_T)/src/pathcache.c \
+    $(SRC_T)/src/stats.c \
     $(SRC_T)/src/proc_rewrite.c \
     $(SRC_T)/src/proc_shadow.c \
     $(SRC_T)/src/identity.c \

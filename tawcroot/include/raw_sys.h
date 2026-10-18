@@ -16,7 +16,14 @@
 extern long tawcroot_raw_syscall(long nr, long a, long b, long c,
 				 long d, long e, long f);
 
+#if defined(TAWCROOT_STATS) && defined(__aarch64__)
+/* Measurement builds count every syscall tawcroot itself issues. */
+void tawcroot_stats_inner(long nr);
+#define TAWC_RAW(nr, ...) \
+	(tawcroot_stats_inner(nr), tawcroot_raw_syscall((nr), ##__VA_ARGS__))
+#else
 #define TAWC_RAW(nr, ...) tawcroot_raw_syscall((nr), ##__VA_ARGS__)
+#endif
 
 static inline long tawc_write(int fd, const void *buf, size_t n)
 { return TAWC_RAW(TAWC_SYS_write, fd, (long)buf, (long)n, 0, 0, 0); }

@@ -26,6 +26,7 @@
 #include "io.h"
 #include "linkstore.h"
 #include "path.h"
+#include "stats.h"
 #include "path_scratch.h"
 #include "raw_sys.h"
 #include "shm.h"
@@ -406,6 +407,7 @@ static long handle_getdents64(const tawcroot_syscall_args *args,
 		return n;
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
 	char *proc_link = scratch->buf[0];
+	tawcroot_stats_event(TAWCROOT_EV_GETDENTS_CLASSIFY);
 	long ln = tawc_readlinkat(AT_FDCWD, self_path,
 	                          proc_link, TAWCROOT_PATH_SCRATCH_SIZE);
 	if (ln <= 0 || ln >= (long)TAWCROOT_PATH_SCRATCH_SIZE) return n;

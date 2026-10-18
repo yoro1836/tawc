@@ -14,6 +14,7 @@
 #include "io.h"
 #include "loader_elf.h"
 #include "loader_exec.h"
+#include "stats.h"
 #include "loader_jump.h"
 #include "proctitle.h"
 #include "loader_map.h"
@@ -352,6 +353,8 @@ void tawcroot_loader_exec(const struct tawc_loader_exec_args *args)
 	if (bin_pl.phdr_addr == 0)
 		LOADER_FAIL(73);
 
+	tawcroot_stats_mark(TAWCROOT_PHASE_BINARY);
+
 	/* --- 3. Optional: ld.so for dynamic guests. --- */
 	uintptr_t at_base = 0;
 	uintptr_t entry   = bin_pl.entry;
@@ -390,6 +393,8 @@ void tawcroot_loader_exec(const struct tawc_loader_exec_args *args)
 		entry   = ld_pl.entry;
 	}
 	tawc_close((int)bin_fd);
+
+	tawcroot_stats_mark(TAWCROOT_PHASE_INTERP);
 
 	/* --- 4. Allocate fresh stack. ---
 	 *
@@ -461,6 +466,7 @@ void tawcroot_loader_exec(const struct tawc_loader_exec_args *args)
 	 * region, which is where eff_argv/guest_path point on the
 	 * top-level prod entry. */
 	tawcroot_proctitle_apply(args->guest_path, eff_argc, eff_argv);
+	tawcroot_stats_guest_entering();
 	tawc_loader_jump(so.sp, entry);
 }
 
@@ -493,6 +499,7 @@ void tawcroot_loader_exec_child(int state_fd, const char *platform)
 	tawcroot_exec_state st;
 	if (tawcroot_exec_state_read(buf, (size_t)size, argv_buf, envp_buf, &st) != 0)
 		LOADER_FAIL(82);
+	tawcroot_stats_mark(TAWCROOT_PHASE_STATE);
 
 	/* Phase 2g: re-establish tawcroot's per-process state in the new
 	 * incarnation. The seccomp filter is inherited (kernel state) but
@@ -519,6 +526,8 @@ void tawcroot_loader_exec_child(int state_fd, const char *platform)
 			.n_shm            = st.n_shm,
 		};
 		tawcroot_supervisor_init(&sa);
+		tawcroot_stats_init(sa.store_host_path, 0);
+		tawcroot_stats_mark(TAWCROOT_PHASE_SUPERVISOR);
 
 		/* Root-view RO bit (guest chrooted into an RO bind before
 		 * this exec): restore alongside the rest of the view. */

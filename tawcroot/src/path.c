@@ -36,6 +36,7 @@
 #include "path.h"
 #include "path_oracle.h"
 #include "pathcache.h"
+#include "stats.h"
 #include "path_orchestrate.h"
 #include "path_resolve.h"
 #include "path_scratch.h"
@@ -125,6 +126,7 @@ size_t               tawcroot_n_binds = 0;
 
 long tawcroot_proc_fd_to_host_path(int fd, char *out, size_t out_cap)
 {
+	tawcroot_stats_event(TAWCROOT_EV_PROCFD_READLINK);
 	if (!out || out_cap < 2) return TAWC_EINVAL;
 
 	char link[64];
@@ -541,7 +543,9 @@ static long prod_readlink(void *ctx, const char *suffix,
 	 * (pathcache.h); bind routes always ask the kernel. */
 	uint64_t epoch = 0;
 	if (!best) {
-		if (tawcroot_pathcache_known_plain(suffix)) return TAWC_EINVAL;
+		int plain = tawcroot_pathcache_known_plain(suffix);
+		tawcroot_stats_pathcache(plain);
+		if (plain) return TAWC_EINVAL;
 		epoch = tawcroot_pathcache_epoch();
 	}
 	long n = TAWC_RAW(TAWC_SYS_readlinkat, fd,

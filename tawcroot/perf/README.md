@@ -129,6 +129,23 @@ reported as an application speedup. This uses the same optional static
 aarch64 glibc toolchain as the exec-cost probe; no production dependency
 or runtime patching is enabled.
 
+## Where real workloads spend their time
+
+`trap-stats.py` attributes app-domain workload time to tawcroot. Build a
+measurement runtime with `EXTRA_CFLAGS=-DTAWCROOT_STATS tawcroot/build.sh
+--abi=aarch64` (production builds compile the hooks out; see
+`include/stats.h`), swap it in with `repack-runtime-apk.sh`, then:
+
+```sh
+TAWC_TARGET=physical tawcroot/perf/trap-stats.py --cpu 9 [--workloads a,b]
+```
+
+Per workload it prints wall time, trap counts with handler time and the
+syscalls tawcroot itself issued per trap, path cache hit rate, the
+sources of `/proc/self/fd` readlinks, and `--exec-child` init split into
+phases with minor faults. Handler time excludes SIGSYS delivery and
+return. Reinstall the production runtime afterwards.
+
 ## Local competitor tools
 
 These tools are only for local perf runs. Do not add them to the normal

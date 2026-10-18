@@ -28,6 +28,7 @@
 #include "handler.h"
 #include "io.h"
 #include "raw_sys.h"
+#include "stats.h"
 #include "dispatch.h"
 #include "errno_neg.h"
 #include "rescue.h"
@@ -177,8 +178,12 @@ static void sigsys_handler(int sig, siginfo_t *info, void *ucontext)
 	 * rescue wrapper (rescue.h), which owns the lazy DAC-override
 	 * retry; on everything but an -EACCES at virtual root it is a
 	 * plain table lookup plus a slot claim. */
+	uint64_t stats_t0 = tawcroot_stats_now();
+	uint64_t stats_i0 = tawcroot_stats_inner_seen();
 	long rv = tawcroot_fs_sync();
 	if (!rv) rv = tawcroot_dispatch_call(&args, uc);
+	tawcroot_stats_trap(args.nr, tawcroot_stats_now() - stats_t0,
+			    tawcroot_stats_inner_seen() - stats_i0);
 #ifdef TAWCROOT_TRACE
 	{
 		/* Build the trace line into a stack buffer and emit in one

@@ -20,6 +20,7 @@
 #include "linkstore.h"
 #include "path.h"
 #include "pathcache.h"
+#include "stats.h"
 #include "raw_sys.h"
 #include "shm.h"
 #include "supervisor.h"
@@ -89,6 +90,8 @@ void tawcroot_supervisor_init(const struct tawcroot_supervisor_args *args)
 		tawc_exit_group(92);
 	}
 
+	tawcroot_stats_mark(TAWCROOT_PHASE_SV_ROOT);
+
 	/* (4) Bind table. Strings must outlive this call — the table
 	 * keeps pointers, not copies. Both callers satisfy this: prod
 	 * copies cli args into a stack buffer that lives for the rest
@@ -110,6 +113,8 @@ void tawcroot_supervisor_init(const struct tawcroot_supervisor_args *args)
 			tawc_exit_group(93);
 		}
 	}
+
+	tawcroot_stats_mark(TAWCROOT_PHASE_SV_BINDS);
 
 	/* (5) Inherited /dev/shm name table. Top-level entries pass
 	 * n_shm == 0 and skip this step. The internal memfds are
@@ -135,7 +140,9 @@ void tawcroot_supervisor_init(const struct tawcroot_supervisor_args *args)
 
 	/* (6) Memoise well-known guest paths and initialise the dispatch
 	 * table BEFORE installing the handler. The handler reads both. */
+	tawcroot_stats_mark(TAWCROOT_PHASE_SV_STORE);
 	tawcroot_path_memoize_well_known();
+	tawcroot_stats_mark(TAWCROOT_PHASE_SV_MEMO);
 	tawcroot_dispatch_init();
 
 	/* (7) Install the SIGSYS handler. After this point we can run
@@ -168,4 +175,5 @@ void tawcroot_supervisor_init(const struct tawcroot_supervisor_args *args)
 	 * for /proc/self/exe). Pinned for the life of the APK install,
 	 * so the value stays valid across subsequent execveats. */
 	tawcroot_init_self_host_path();
+	tawcroot_stats_mark(TAWCROOT_PHASE_SV_HANDLER);
 }

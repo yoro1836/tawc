@@ -48,6 +48,7 @@
 #include "loader_exec.h"
 #include "path.h"
 #include "pathcache.h"
+#include "stats.h"
 #include "proctitle.h"
 #include "raw_sys.h"
 #include "supervisor.h"
@@ -354,6 +355,7 @@ static void prod_rootfs_init(const char *rootfs,
 		.n_shm            = 0,
 	};
 	tawcroot_supervisor_init(&sa);
+	tawcroot_stats_init(sa.store_host_path, 1);
 
 	/* Age-gated stray-temp sweep — top-level entry only (--exec-child
 	 * runs per guest exec, and guests from OTHER sessions may still
@@ -528,6 +530,7 @@ void tawcroot_main(int argc, char **argv)
 	tawcroot_proctitle_stash(argc, argv);
 
 	enum tawcroot_entry entry = classify_entry(argc, argv);
+	if (entry == ENTRY_EXEC_CHILD) tawcroot_stats_main_entered();
 
 	/* Top-level binding (PDEATHSIG + orphan-detect) is unsafe on the
 	 * --exec-child re-exec; see bind_top_level_to_parent's docstring

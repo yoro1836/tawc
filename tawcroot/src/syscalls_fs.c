@@ -50,6 +50,7 @@
 #include "rescue.h"
 #include "shm.h"
 #include "syscalls_fs.h"
+#include "stats.h"
 #include "sysnr.h"
 #include "tawc_string.h"
 #include "tawc_uapi.h"
@@ -220,6 +221,7 @@ static int fd_in_ro_bind(int fd, int opath_passes)
 	}
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
 	char *hostp = scratch->buf[0];
+	tawcroot_stats_event(TAWCROOT_EV_RO_BIND_FD);
 	long n = tawcroot_proc_fd_to_host_path(fd, hostp,
 					       TAWCROOT_PATH_SCRATCH_SIZE);
 	if (n <= 0) return 0;
@@ -517,6 +519,7 @@ static unsigned long fd_object_nlink(int fd, unsigned int mode,
 	if (!S_ISREG(mode) && !S_ISLNK(mode)) return 0;
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
 	char *hostp = scratch->buf[0];
+	tawcroot_stats_event(TAWCROOT_EV_FSTAT_NLINK);
 	long n = tawcroot_proc_fd_to_host_path(fd, hostp,
 					       TAWCROOT_PATH_SCRATCH_SIZE);
 	if (n <= 0) return 0;
@@ -750,6 +753,7 @@ static long translate_local(struct tawcroot_path_scratch *scratch, int slot,
 			if (path_buf[0] != 0) {
 				TAWCROOT_PATH_SCRATCH_AUTO(lift);
 				char *abs = lift->buf[0];
+				tawcroot_stats_event(TAWCROOT_EV_DIRFD_LIFT);
 				long al = tawcroot_fd_to_guest_abs(dirfd, abs,
 				                                   TAWCROOT_PATH_SCRATCH_SIZE);
 				if (al >= 0) {
