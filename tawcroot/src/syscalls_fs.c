@@ -730,6 +730,57 @@ static long handle_newfstatat(const tawcroot_syscall_args *args,
  * bind so `..` clamps at the bind boundary. Outside-rootfs+outside-binds
  * fds (e.g. host /proc tree) still ENOENT and fall through to kernel
  * passthrough — there's nothing in our view to escape into. */
+/* Read access to one plain name under a dirfd the fd path cache vouches
+ * for (fdpath.h): `abs` ("/" or "/a/b", from tawcroot_fd_to_guest_abs)
+ * names a real directory of the current root reached without symlinks,
+ * so resolving abs/name only concerns the leaf. When the leaf is not
+ * followed, or the path cache knows it is not a symlink, and it lies
+ * outside every bind, (dirfd, name) is what the full translation would
+ * produce relative to the root — minus a userland walk over every
+ * prefix and the kernel's re-walk from the root. Writes keep the root-
+ * based route so mutations stamp the path cache. Returns 1 when `out`
+ * was filled. */
+static int dirfd_leaf_shortcut(int dirfd, char *abs, size_t al,
+			       const char *name, tawcroot_path_mode mode,
+			       tawcroot_path_intent intent, char *suffix,
+			       size_t suffix_cap, struct fs_path *out)
+{
+	if (intent != TAWCROOT_PATH_INTENT_READ ||
+	    (mode != TAWCROOT_PATH_FOLLOW && mode != TAWCROOT_PATH_NOFOLLOW))
+		return 0;
+	size_t nl = 0;
+	for (; name[nl]; nl++)
+		if (name[nl] == '/') return 0;
+	if (nl == 0 || nl >= suffix_cap ||
+	    (name[0] == '.' && (nl == 1 || (nl == 2 && name[1] == '.'))))
+		return 0;
+	/* abs becomes the leaf's root-relative key. */
+	size_t pos = al;
+	if (abs[pos - 1] != '/' &&
+	    tawc_str_append(abs, TAWCROOT_PATH_SCRATCH_SIZE, &pos, "/"))
+		return 0;
+	if (tawc_str_append(abs, TAWCROOT_PATH_SCRATCH_SIZE, &pos, name))
+		return 0;
+	const char *key = abs + 1;
+	size_t kl = pos - 1;
+	for (size_t i = 0; i < tawcroot_n_binds; i++) {
+		const struct tawcroot_bind *b = &tawcroot_binds[i];
+		if (!b->active) continue;
+		if (b->dst_len == 0) return 0;
+		if (kl >= b->dst_len && tawc_starts_with(key, b->dst) &&
+		    (kl == b->dst_len || key[b->dst_len] == '/'))
+			return 0;
+	}
+	if (mode == TAWCROOT_PATH_FOLLOW && !tawcroot_pathcache_known_plain(key))
+		return 0;
+	for (size_t i = 0; i <= nl; i++) suffix[i] = name[i];
+	out->fd      = dirfd;
+	out->is_root = 0;
+	out->ro      = 0;
+	tawcroot_rescue_note(dirfd, suffix);
+	return 1;
+}
+
 static long translate_local(struct tawcroot_path_scratch *scratch, int slot,
 			    int dirfd, tawcroot_path_mode mode,
 			    tawcroot_path_intent intent,
@@ -775,7 +826,13 @@ static long translate_local(struct tawcroot_path_scratch *scratch, int slot,
 				tawcroot_stats_event(TAWCROOT_EV_DIRFD_LIFT);
 				long al = tawcroot_fd_to_guest_abs(dirfd, abs,
 				                                   TAWCROOT_PATH_SCRATCH_SIZE);
+				if (al > 0 && dirfd_leaf_shortcut(
+						dirfd, abs, (size_t)al,
+						path_buf, mode, intent,
+						suffix, suffix_cap, out))
+					return 0;
 				if (al >= 0) {
+					abs[al] = 0;
 					size_t pos = (size_t)al;
 					long je = 0;
 					if (abs[pos - 1] != '/')

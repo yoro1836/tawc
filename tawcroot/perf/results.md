@@ -436,3 +436,25 @@ commit, `run-macro-shell.sh --rounds 5 --runs 7 --cpu 9`:
 
 Absolute times run higher than the 2026-10-18 tables (different
 session and device state); compare ratios.
+
+## 2026-10-19 dirfd leaf shortcut
+
+`trap-stats.py --shell` (default build) showed handler time at 29–68%
+of wall in find/ls/grep/tar, dominated by dirfd-relative `fstatat` and
+`openat` (8–9 µs/trap): each single-name lookup was rewritten to the
+whole root-relative path, re-checked prefix by prefix in userland and
+re-walked by the kernel from the root. Plain read lookups now go to
+`(dirfd, name)` (`notes/tawcroot/path-translation.md`, "Leaf
+shortcut"). `run-macro-shell.sh --rounds 5 --runs 7 --cpu 9`:
+
+| Workload | Before | After | After/before |
+| --- | ---: | ---: | ---: |
+| `tar_usr_share` | 1,223 ms | 1,152 ms | 0.94 |
+| `grep_tree` | 989 ms | 938 ms | 0.95 |
+| `find_usr` | 183 ms | 174 ms | 0.95 |
+| `stat_many` | 210 ms | 203 ms | 0.97 |
+| `ls_lR_usr_lib` | 368 ms | 370 ms | 1.01 |
+
+`ls -lR` names files relative to the cwd, not a dirfd, so it is
+unaffected; its largest cost is `llistxattr` (8.5 µs/trap, 30% of wall),
+routed through `/proc/self/fd/<rootfs>/…`.

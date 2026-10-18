@@ -237,6 +237,15 @@ unchanged. Only plain rootfs paths are cached (the path cache stamps no
 bind names), and nothing is cached with the path cache off. Tests:
 `tests/hosted/test_fdpath.c`.
 
+**Leaf shortcut.** The lifted directory path is the dirfd's real
+location, so it has no symlink components. For read intent with
+`FOLLOW`/`NOFOLLOW` and a single plain name (no `/`, not `.`/`..`)
+outside every bind, `dirfd_leaf_shortcut` hands the kernel
+`(dirfd, name)` instead of `(rootfs_fd, whole/path/name)`: no userland
+walk over every prefix and no kernel re-walk from the root. `FOLLOW`
+also needs the path cache to know the leaf is not a symlink; writes keep
+the root-based route so their mutations stamp the path cache.
+
 ### DAC override
 
 tawcroot fakes uid 0, but the kernel sees the app uid on every real

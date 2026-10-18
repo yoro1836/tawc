@@ -151,3 +151,83 @@ test(hosted_fdpath_reused_fd_number_revalidates)
 	cache_off(store);
 	th_teardown(&v);
 }
+
+/* One plain name under a known dirfd skips the root-based route
+ * (syscalls_fs.c dirfd_leaf_shortcut). These cover what the shortcut
+ * must still get right: bind mount points, `..` at the root, leaf
+ * symlinks with absolute targets, and that it is actually taken. */
+static long last_stat_dirfd;
+static char last_stat_path[256];
+static bool note_fstatat(long nr, const long args[6], long *ret)
+{
+	(void)ret;
+	if (nr == TAWC_SYS_fstatat) {
+		last_stat_dirfd = args[0];
+		snprintf(last_stat_path, sizeof last_stat_path, "%s",
+			 (const char *)args[1]);
+	}
+	return false;
+}
+
+static ino_t host_ino(const char *host)
+{
+	struct stat st;
+	return stat(host, &st) == 0 ? st.st_ino : 0;
+}
+
+test(hosted_fdpath_leaf_shortcut_respects_binds_and_root)
+{
+	th_view v;
+	th_setup(&v, "fdpath-leaf-bind");
+	char store[4300], src[4300];
+	snprintf(src, sizeof src, "%s", th_add_bind(&v, "/run"));
+	cache_on(&v, store, sizeof store);
+	int root = open_dir(test_ctx, "/");
+	for (int pass = 0; pass < 2; pass++) {
+		struct stat st;
+		test_int_eq(th_sys(TAWC_SYS_fstatat, root, "run", &st,
+				   AT_SYMLINK_NOFOLLOW, 0, 0), 0);
+		test_int_eq((long)st.st_ino, (long)host_ino(src));
+		for (int nofollow = 0; nofollow < 2; nofollow++) {
+			test_int_eq(th_sys(TAWC_SYS_fstatat, root, "..", &st,
+					   nofollow ? AT_SYMLINK_NOFOLLOW : 0,
+					   0, 0), 0);
+			test_int_eq((long)st.st_ino, (long)host_ino(v.root));
+		}
+	}
+	int run = open_dir(test_ctx, "/run");
+	test_int_eq(stat_at(test_ctx, run, "probe.txt"), 0);
+	test_int_eq(stat_at(test_ctx, root, "etc"), 0);
+	close(run);
+	close(root);
+	cache_off(store);
+	th_teardown(&v);
+}
+
+test(hosted_fdpath_leaf_shortcut_follow)
+{
+	th_view v;
+	th_setup(&v, "fdpath-leaf-follow");
+	char store[4300], p[4300];
+	cache_on(&v, store, sizeof store);
+	snprintf(p, sizeof p, "%s/etc/abs", v.root);
+	test_int_eq(symlink("/etc/probe", p), 0);
+	snprintf(p, sizeof p, "%s/etc/probe", v.root);
+	ino_t probe = host_ino(p);
+	int etc = open_dir(test_ctx, "/etc");
+	tawcroot_test_raw_hook = note_fstatat;
+	for (int pass = 0; pass < 3; pass++) {
+		struct stat st;
+		test_int_eq(th_sys(TAWC_SYS_fstatat, etc, "abs", &st, 0, 0, 0), 0);
+		test_int_eq((long)st.st_ino, (long)probe);
+		test_int_eq(th_sys(TAWC_SYS_fstatat, etc, "probe", &st, 0, 0, 0), 0);
+		test_int_eq((long)st.st_ino, (long)probe);
+	}
+	/* Warm by now: the plain leaf went straight to the dirfd. */
+	test_int_eq(last_stat_dirfd, etc);
+	test_str_eq(last_stat_path, "probe");
+	tawcroot_test_raw_hook = NULL;
+	close(etc);
+	cache_off(store);
+	th_teardown(&v);
+}
