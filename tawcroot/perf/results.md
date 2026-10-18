@@ -579,3 +579,11 @@ default build:
 | 64 | 0.82 | 0.87 | 1.00 | 0.99 |
 
 Threshold 64 is now the default, and the fastpath is on for aarch64.
+
+Integration checks with the fastpath on by default (`1e0aff4` runtime
+repacked into the dev APK): `run-integration-tests.sh --no-build
+tawcroot` 20/20 and `apps::` 4/4 (Firefox, SuperTuxKart, lxterminal,
+gtk4-widget-factory to first paint and interaction). Installing the
+apps' dependencies with `pacman -Syu --needed` (a large upgrade plus
+the GTK/Mesa/Firefox stacks) also ran under it; its only error was the
+documented `setcap` scriptlet limitation (`notes/tawcroot/status.md`).
