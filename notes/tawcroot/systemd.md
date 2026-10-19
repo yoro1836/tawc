@@ -68,9 +68,9 @@ parent's view until its exec builds its own.
   mountinfo; those fds sit above the reserved fd floor, where a stacked
   filter traps `epoll_ctl` and registers an inotify fd on
   `<store>/mounts.event` instead, so systemd sees mount changes.
-- New mount API: `fsopen("tmpfs"|"ramfs")` returns an `O_PATH` fd on a
-  memfd holding the options (reads fail, so libmount's message drain
-  ends); `fsconfig` records `mode`/`source`/`ro`; `fsmount` creates the
+- New mount API: `fsopen("tmpfs"|"ramfs")` returns an `O_PATH` fd on
+  `<store>/mnt/.fsctx-<n>`, which holds the options (reads fail, so
+  libmount's message drain ends; Android apps can't reopen memfds); `fsconfig` records `mode`/`source`/`ro`; `fsmount` creates the
   backing dir and returns an `O_PATH` fd on it; `move_mount` of that fd
   adds the entry. systemd 258+ mounts credentials this way and treats
   `ENOSYS` as fatal. Other types, `open_tree`, `fspick`,

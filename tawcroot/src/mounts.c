@@ -466,44 +466,42 @@ long tawcroot_mounts_umount(const char *gtarget, int flags)
 /* --- new mount API ------------------------------------------------------- */
 
 /* fsopen/fsconfig/fsmount/move_mount for the filesystems mount(2)
- * emulates; systemd mounts credentials this way. fsopen gives a memfd
- * holding a struct fsctx; fsmount creates the backing directory and
- * returns an O_PATH fd on it; move_mount of that fd adds the entry.
- * Other types get ENOSYS, which sends libmount back to mount(2). */
+ * emulates; systemd mounts credentials this way. fsopen gives an O_PATH
+ * fd on <store>/mnt/.fsctx-<n>, a file holding a struct fsctx (reads
+ * fail like a kernel fs_context's with no messages, so libmount's drain
+ * ends; no memfd, which Android apps may not reopen); fsmount creates
+ * the backing directory and returns an O_PATH fd on it; move_mount of
+ * that fd adds the entry. Other types get ENOSYS, which sends libmount
+ * back to mount(2). */
 #define FSCTX_MAGIC 0x46534358
-#define FSCTX_NAME "tawcroot-fsctx"
+#define FSCTX_PREFIX "/mnt/.fsctx-"
 struct fsctx { uint32_t magic, id, ro; char type[8], mode[8], source[64]; };
 /* fsmount'ed but not yet attached, in this process. */
 static struct { uint32_t id, ro; char type[8], source[64]; } g_detached[4];
 
-/* The context fd is O_PATH on a memfd: reads fail like a kernel
- * fs_context's with no messages (libmount drains it until -1). */
-static long fsctx_io(int fd, struct fsctx *c, int write)
+/* Host path of context fd `fd` into `path`, or 0 if it is not one. */
+static int fsctx_path(int fd, char *path)
 {
-    char link[64];
-    if (tawc_proc_fd_path(link, sizeof link, fd, 0) < 0) return TAWC_EIO;
-    long rw = tawc_openat(AT_FDCWD, link, (write ? O_WRONLY : O_RDONLY) | O_CLOEXEC, 0);
-    if (rw < 0) return rw;
-    long n = write ? TAWC_RAW(TAWC_SYS_pwrite64, rw, (long)c, sizeof *c, 0, 0, 0)
-                   : tawc_pread64((int)rw, c, sizeof *c, 0);
-    tawc_close((int)rw);
+    TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+    char *want = scratch->buf[0];
+    if (tawcroot_proc_fd_to_host_path(fd, path, TAWCROOT_PATH_SCRATCH_SIZE) < 0 ||
+        store_path(want, FSCTX_PREFIX) < 0) return 0;
+    return tawc_starts_with(path, want);
+}
+
+static long fsctx_io(const char *path, struct fsctx *c, int write)
+{
+    long f = tawc_openat(AT_FDCWD, path, (write ? O_WRONLY : O_RDONLY) | O_CLOEXEC | O_NOFOLLOW, 0);
+    if (f < 0) return f;
+    long n = write ? TAWC_RAW(TAWC_SYS_pwrite64, f, (long)c, sizeof *c, 0, 0, 0)
+                   : tawc_pread64((int)f, c, sizeof *c, 0);
+    tawc_close((int)f);
     return n == (long)sizeof *c ? 0 : TAWC_EIO;
 }
 
-static int fsctx_load(int fd, struct fsctx *c)
+static int fsctx_load(int fd, struct fsctx *c, char *path)
 {
-    char link[64], name[64];
-    if (tawc_proc_fd_path(link, sizeof link, fd, 0) < 0) return 0;
-    long n = TAWC_RAW(TAWC_SYS_readlinkat, AT_FDCWD, (long)link, (long)name, sizeof name - 1, 0, 0);
-    if (n < 0) return 0;
-    name[n] = 0;
-    return tawc_starts_with(name, "/memfd:" FSCTX_NAME) && !fsctx_io(fd, c, 0) &&
-           c->magic == FSCTX_MAGIC;
-}
-
-static long fsctx_save(int fd, const struct fsctx *c)
-{
-    return fsctx_io(fd, (struct fsctx *)c, 1);
+    return fsctx_path(fd, path) && !fsctx_io(path, c, 0) && c->magic == FSCTX_MAGIC;
 }
 
 static long fs_open(const char *gname, unsigned flags)
@@ -515,22 +513,32 @@ static long fs_open(const char *gname, unsigned flags)
         return TAWC_ENOSYS;
     c.magic = FSCTX_MAGIC;
     (void)tawc_str_copy(c.source, sizeof c.source, c.type);
-    long mfd = tawc_memfd_create(FSCTX_NAME, 1);
-    if (mfd < 0) return mfd;
-    long e = TAWC_RAW(TAWC_SYS_pwrite64, mfd, (long)&c, sizeof c, 0, 0, 0);
-    char link[64];
-    long fd = e != (long)sizeof c ? TAWC_EIO : tawc_proc_fd_path(link, sizeof link, (int)mfd, 0);
-    if (fd >= 0)
-        fd = tawc_openat(AT_FDCWD, link, O_PATH | ((flags & 1 /*FSOPEN_CLOEXEC*/) ? O_CLOEXEC : 0), 0);
-    tawc_close((int)mfd);
-    return fd;
+    TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+    char *path = scratch->buf[0];
+    long lk = lock(2 /*LOCK_EX*/);
+    if (lk < 0) return lk;
+    uint32_t n = g_tab->next_id++;
+    tawc_close((int)lk);
+    size_t len = 0;
+    if (store_path(path, FSCTX_PREFIX) < 0) return TAWC_ENOENT;
+    len = tawc_strlen(path);
+    if (tawc_str_append_dec(path, TAWCROOT_PATH_SCRATCH_SIZE, &len, n)) return TAWC_ENAMETOOLONG;
+    long f = tawc_openat(AT_FDCWD, path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (f < 0) return f;
+    long w = TAWC_RAW(TAWC_SYS_pwrite64, f, (long)&c, sizeof c, 0, 0, 0);
+    tawc_close((int)f);
+    if (w != (long)sizeof c) return TAWC_EIO;
+    return tawc_openat(AT_FDCWD, path,
+        O_PATH | O_NOFOLLOW | ((flags & 1 /*FSOPEN_CLOEXEC*/) ? O_CLOEXEC : 0), 0);
 }
 
 static long fs_config(int fd, unsigned cmd, const char *gkey, const char *gval)
 {
     struct fsctx c;
     char key[16];
-    if (!fsctx_load(fd, &c)) return TAWC_EINVAL;
+    TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+    char *path = scratch->buf[0];
+    if (!fsctx_load(fd, &c, path)) return TAWC_EINVAL;
     if (cmd == 7 /*CMD_RECONFIGURE*/ && c.id) {
         for (int i = 0; i < 4; ++i)
             if (g_detached[i].id == c.id) g_detached[i].ro = c.ro;
@@ -554,19 +562,19 @@ static long fs_config(int fd, unsigned cmd, const char *gkey, const char *gval)
         (void)tawc_copy_string_from_guest(c.source, sizeof c.source, gval);
     else
         return 0;
-    return fsctx_save(fd, &c);
+    return fsctx_io(path, &c, 1);
 }
 
 static long fs_mount(int fd, unsigned flags, unsigned attrs)
 {
     struct fsctx c;
-    if (!fsctx_load(fd, &c)) return TAWC_EINVAL;
+    TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+    char *dir = scratch->buf[0], *data = scratch->buf[1], *path = scratch->buf[2];
+    if (!fsctx_load(fd, &c, path)) return TAWC_EINVAL;
     if (c.id) return TAWC_EBUSY;
     int slot = 0;
     while (slot < 4 && g_detached[slot].id) ++slot;
     if (slot == 4) return TAWC_ENOSPC;
-    TAWCROOT_PATH_SCRATCH_AUTO(scratch);
-    char *dir = scratch->buf[0], *data = scratch->buf[1];
     size_t n = 0;
     data[0] = 0;
     if (c.mode[0]) {
@@ -582,7 +590,7 @@ static long fs_mount(int fd, unsigned flags, unsigned attrs)
     long mfd = tawc_openat(AT_FDCWD, dir, O_PATH | O_DIRECTORY | ((flags & 1) ? O_CLOEXEC : 0), 0);
     if (mfd < 0) return mfd;
     c.id = id;
-    (void)fsctx_save(fd, &c);
+    (void)fsctx_io(path, &c, 1);
     g_detached[slot].id = id;
     g_detached[slot].ro = c.ro || (attrs & 1 /*MOUNT_ATTR_RDONLY*/);
     (void)tawc_str_copy(g_detached[slot].type, sizeof g_detached[slot].type, c.type);
