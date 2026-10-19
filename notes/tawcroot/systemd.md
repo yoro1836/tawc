@@ -6,11 +6,12 @@ kernel isolation.
 
 ```
 tawcroot -r <rootfs> -b /proc:/proc -b /sys:/sys -b /dev:/dev \
-    -b <dir>:/run -b <pty>:/dev/console --init --cgroup -- /lib/systemd/systemd
+    --console <log> --init --cgroup -- /lib/systemd/systemd
 ```
 
 Set `container=<name>` in the environment so systemd takes its
-container paths. `/dev/console` must be a tty or systemd logs nothing.
+container paths. `/dev/console` must be a tty or systemd logs nothing;
+`--console FILE` provides one (a pty copied into FILE), or bind a tty.
 
 ## Pid 1 (`--init`)
 See [seccomp-filter.md](seccomp-filter.md) for the PID filter and
@@ -138,8 +139,11 @@ App: the per-distro "Boot with systemd" setting (tawcroot installs,
 `/usr/lib/systemd/systemd` on the first spawn and `--join`s every spawn
 while it runs. The init gets the normal binds minus `/tmp/.X11-unix`
 (boot-time tmpfiles empties that dir, Xwayland's socket included) and
-guest `/var/log/tawc-console.log` as `/dev/console` (tawcroot's own
-errors land there too), so `console-getty` fails there. Turning the setting off sends SIGRTMIN+4 (poweroff). Not
+`--console <rootfs>/var/log/tawc-console.log`: tawcroot opens a pty,
+binds its slave as `/dev/console` and forks a helper that appends the
+master's output to that file (systemd won't log to a non-tty console;
+it exits 255 silently on a fatal boot error otherwise). tawcroot's own
+errors and the init's exit status land there too. Turning the setting off sends SIGRTMIN+4 (poweroff). Not
 yet run on a device.
 
 ## Known boot failures

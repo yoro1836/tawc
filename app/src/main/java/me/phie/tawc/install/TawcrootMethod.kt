@@ -507,7 +507,8 @@ class TawcrootMethod(context: Context) : InstallationMethod {
                 for (spec in bindSpecs(assetBinds, externalBinds, store.andoHostDir(rootfs))) {
                     if (spec.dst != "/tmp/.X11-unix") addAll(listOf("-b", spec.arg()))
                 }
-                addAll(listOf("-b", "$console:/dev/console"))
+                // A pty console copied into the log: systemd only logs to a tty.
+                addAll(listOf("--console", console.path))
                 addAll(listOf("--init", "--cgroup", "--", "/usr/bin/env", "-i", "container=tawc", initBin))
             }
             console.writeText("")

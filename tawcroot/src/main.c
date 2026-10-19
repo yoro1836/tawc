@@ -36,6 +36,8 @@
 
 #include <signal.h>
 #include <sys/prctl.h>
+#include <asm/ioctls.h>
+#include <asm/unistd.h>
 
 #include "tawcroot.h"
 #include "dispatch.h"
@@ -222,7 +224,7 @@ static __attribute__((noreturn)) void usage(int code)
 	            "  tawcroot-testhost -r ROOTFS [-b SRC:DST[:ro]]...\n");
 #else
 	tawc_io_str("tawcroot: usage:\n"
-	            "  tawcroot -r ROOTFS [--host-user] [--init [--cgroup] | --join] [-b SRC:DST[:ro]]... -- CMD [ARGS...]\n"
+	            "  tawcroot -r ROOTFS [--host-user] [--init [--cgroup] [--console FILE] | --join] [-b SRC:DST[:ro]]... -- CMD [ARGS...]\n"
 	            "  tawcroot --exec-child <fd>\n");
 #endif
 	tawc_exit_group(code);
@@ -461,6 +463,47 @@ static enum tawcroot_entry classify_entry(int argc, char **argv)
 }
 
 #ifndef TAWCROOT_TESTHOST
+/* `--console FILE`: systemd only logs to a tty console, so give the
+ * guest a pty slave as /dev/console and fork a helper that appends the
+ * master's output to FILE. The helper outlives slave hangups while its
+ * parent (the init) lives, then drains and exits. Returns the
+ * "SLAVE:/dev/console" bind spec, or 0. */
+static const char *console_pty(const char *file)
+{
+	static char spec[48];
+	int unlock = 0;
+	unsigned n = 0;
+	long m = tawc_openat(AT_FDCWD, "/dev/ptmx", O_RDWR | O_NOCTTY | O_CLOEXEC, 0);
+	if (m < 0) return 0;
+	long out = tawc_openat(AT_FDCWD, file, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+	size_t k = 0;
+	if (out < 0 || TAWC_RAW(TAWC_SYS_ioctl, m, TIOCSPTLCK, (long)&unlock, 0, 0, 0) < 0 ||
+	    TAWC_RAW(TAWC_SYS_ioctl, m, TIOCGPTN, (long)&n, 0, 0, 0) < 0 ||
+	    tawc_str_append(spec, sizeof spec, &k, "/dev/pts/") ||
+	    tawc_str_append_dec(spec, sizeof spec, &k, n) ||
+	    tawc_str_append(spec, sizeof spec, &k, ":/dev/console")) {
+		tawc_close((int)m);
+		if (out >= 0) tawc_close((int)out);
+		return 0;
+	}
+	long parent = tawc_getpid();
+	long pid = TAWC_RAW(TAWC_SYS_clone, SIGCHLD, 0, 0, 0, 0, 0);
+	if (pid == 0) {
+		char buf[512];
+		for (;;) {
+			long r = tawc_read((int)m, buf, sizeof buf);
+			if (r > 0) { (void)tawc_write((int)out, buf, (size_t)r); continue; }
+			/* EIO: no slave open right now. */
+			if (TAWC_RAW(TAWC_SYS_getppid, 0, 0, 0, 0, 0, 0) != parent) tawc_exit_group(0);
+			struct { long s, ns; } ts = { 0, 100000000 };
+			(void)TAWC_RAW(__NR_nanosleep, (long)&ts, 0, 0, 0, 0, 0);
+		}
+	}
+	tawc_close((int)m);
+	tawc_close((int)out);
+	return pid < 0 ? 0 : spec;
+}
+
 __attribute__((noreturn)) static void prod_main(int argc, char **argv)
 {
 	const char *rootfs = 0;
@@ -484,6 +527,15 @@ __attribute__((noreturn)) static void prod_main(int argc, char **argv)
 			i++;
 		} else if (tawc_streq(argv[i], "--init")) {
 			init = 1;
+			i++;
+		} else if (tawc_streq(argv[i], "--console")) {
+			if (i + 1 >= argc || n_binds >= TAWCROOT_MAX_BINDS) usage(2);
+			const char *spec = console_pty(argv[++i]);
+			if (!spec) {
+				tawc_io_str("tawcroot: --console: no pty\n");
+				tawc_exit_group(2);
+			}
+			bind_specs[n_binds++] = spec;
 			i++;
 		} else if (tawc_streq(argv[i], "--join")) {
 			join = 1;
