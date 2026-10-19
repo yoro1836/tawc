@@ -187,12 +187,9 @@ test(seg_layout_no_bss_single_page)
 	test_int_eq((int)s.vaddr_memhi,     0x2000);
 	test_int_eq((int)s.file_offset,     0x1000);
 	test_int_eq((int)s.file_size,       0x1000);
-	/* BSS partial: from end_file (0x1500) to next page (0x2000) — even
-	 * though there's no actual BSS, our slice describes "tail bytes of
-	 * the file-mapped page that don't belong to the file region"; the
-	 * mapper still memsets these. This is correct because the kernel
-	 * `mmap` doesn't zero past p_filesz on its own. */
-	test_int_eq((int)s.bss_partial_lo,  0x1500);
+	/* No BSS: no partial slice, like binfmt_elf (the tail stays
+	 * file-backed). */
+	test_int_eq((int)s.bss_partial_lo,  0x2000);
 	test_int_eq((int)s.bss_partial_hi,  0x2000);
 	test_int_eq((int)s.bss_anon_lo,     0x2000);
 	test_int_eq((int)s.bss_anon_hi,     0x2000);
