@@ -12,6 +12,7 @@ struct tawc_namespace {
 #define TAWC_NS_INIT_SESSION 1u
 #define TAWC_NS_CGROUP 2u        /* --cgroup: fake cgroupfs (cgroup.h) */
 #define TAWC_NS_CG_WRITE_TRAP 4u /* write() on fds >= the reserved floor traps */
+#define TAWC_NS_EPOLL_TRAP 8u    /* epoll_ctl() on fds >= the floor traps (mounts.c) */
 extern struct tawc_namespace tawcroot_namespace;
 void tawcroot_namespace_register(void);
 void tawcroot_namespace_restore(void);
@@ -22,6 +23,14 @@ long tawcroot_namespace_open(const char *path, int flags);
 long tawcroot_namespace_proc_open(const char *path, int flags);
 /* --init capability prctls (bounding/ambient sets, securebits), or TAWC_ENOSYS. */
 long tawcroot_namespace_prctl(long option, long arg);
+/* An init session presents as a user-namespaced container: stat of
+ * /proc/<pid>/ns/user reports this inode instead of the initial
+ * namespace's (which inits compare against). */
+#define TAWCROOT_FAKE_USERNS_INO 0xeffffff0u
+int tawcroot_namespace_is_userns_link(const char *path);
+
+/* Whether `pid` is the fake init or a descendant (1 without an init). */
+int tawcroot_namespace_is_guest(long pid);
 /* In a child of the init: SIGKILL it when the init dies. */
 void tawcroot_namespace_tie_to_init(void);
 int tawcroot_namespace_probe(const char *path);

@@ -62,6 +62,12 @@ reparent to it and their `getppid()` maps to 1. `kill`/`tgkill` aimed
 at init drop signals missing from its `/proc/<pid>/status` SigCgt,
 SIGKILL included, like a namespace init; a SIGKILL from outside the
 guest still lands. Covered by `prod_init_session`.
+In an init session the PID filter also traps `tkill`,
+`rt_(tg)sigqueueinfo` and `pidfd_open`: only the init and its
+descendants (by `/proc` ppid chain) are guests. `kill(-1)`/`kill(0)`/
+`kill(-pgrp)` enumerate `/proc` and signal guests only, single-target
+signals to other pids get `ESRCH`, and `getdents64` on `/proc` hides
+them. Covered by `prod_init_pid_isolation`.
 What else an init session emulates for systemd is in [systemd.md](systemd.md).
 
 Two filters are active: Android's existing `untrusted_app` filter

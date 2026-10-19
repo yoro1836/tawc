@@ -19,20 +19,56 @@ subreaper. On top of that, in an init session:
   `/proc/<pid>/stat|status` (also `self`, `task/<tid>`) are rewritten so
   pid/ppid/pgrp/session/`NSpid` say 1 for init and its ppid says 0.
   systemd checks children's ppid this way.
-- Full fake capabilities (`capget`/`capset`), `PR_CAPBSET_READ/DROP`,
-  `PR_CAP_AMBIENT`, `PR_SET_SECUREBITS` succeed against shadow state.
+- Fake capabilities (`capget`/`capset`) start at systemd-nspawn's
+  default set (`0xfdecafff`, bounding set dropped to match) and
+  `PR_CAPBSET_READ/DROP`, `PR_CAP_AMBIENT`, `PR_SET_SECUREBITS` succeed
+  against shadow state; `/proc/<pid>/status` `Cap*` lines show it.
+- Looks like a user-namespaced container: `uid_map`/`gid_map` read
+  `0 <uid> 1`, `setgroups` reads `deny`, and `/proc/*/ns/user` stats
+  with a non-init inode. systemd then skips units it can't run there
+  (debugfs, tracing, fusectl, hugepages, binfmt_misc). `/proc/sys`
+  `statfs` reports `ST_RDONLY`.
 - Direct children of the init get `PR_SET_PDEATHSIG(SIGKILL)` (at fork
   and at exec, since systemd spawns through `posix_spawn`), so services
   die with the init instead of outliving it.
+- Pid isolation: signals and `/proc` listings only reach the init and
+  its descendants ([seccomp-filter.md](seccomp-filter.md)). A guest
+  `kill(-1)` no longer reaches app processes.
 - `unshare` returns `EPERM`, which systemd reads as "containerized" and
   skips service sandboxing.
-- `mount`: bind mounts keep the existing bind emulation; remounts,
-  propagation changes and mounts on API points (`/proc`, `/sys`, `/dev`,
-  `/dev/shm`, `/dev/pts`, `/run`, `/sys/fs/cgroup`) return 0 without
-  doing anything; everything else (including `MS_MOVE`) is `EPERM`, so
-  systemd takes its plain-directory fallbacks (credentials).
-  `umount2` returns `EINVAL` (`ENOENT` for missing paths): systemd
-  retries umount until `EINVAL`.
+
+## Mounts
+Code: `src/mounts.c`. The session has one mount table, a flock-guarded
+shared mmap at `<store>/mounts` (wiped at start, like
+`<store>/mnt/`). Every process mirrors it into its bind table (binds
+with `mount_id`) on the next path translation after the table's
+generation moves, so there is no per-process mount namespace.
+A `CLONE_VM` child (vfork, `posix_spawn`) shares its parent's bind
+table but not its fds, so it never mirrors; it routes through the
+parent's view until its exec builds its own.
+- `tmpfs`/`ramfs`/`mqueue` mount a fresh backing dir `<store>/mnt/<id>`
+  (`mode=` applies) over the target; `statfs` reports the fs magic.
+  A missing target under an existing parent works (`/dev/mqueue` in a
+  host-bound `/dev`).
+- `MS_BIND` (files too), `MS_MOVE` and `MS_REMOUNT` (`ro` toggle) work
+  on the table; `umount2` removes an entry (a tmpfs's backing dir is
+  detached to `mnt/.dead-<id>`), and returns `EINVAL` for non-mounts so
+  umount loops end. Propagation-only calls and mounts on API points
+  (`/proc`, `/sys`, `/dev`, `/dev/shm`, `/dev/pts`, `/run`,
+  `/sys/fs/cgroup`) return 0; other filesystem types `EPERM`.
+- Targets given as `/proc/self/fd/N` (systemd's style) resolve through
+  the fd.
+- `/proc/mounts` and `/proc/<pid>/mountinfo|mounts` are synthesized from
+  the command line binds plus the table. libmount's monitor epolls
+  mountinfo; those fds sit above the reserved fd floor, where a stacked
+  filter traps `epoll_ctl` and registers an inotify fd on
+  `<store>/mounts.event` instead, so systemd sees mount changes.
+- The new mount API (`fsopen`, `open_tree`, `move_mount`, ...,
+  `mount_setattr`) and `statmount`/`listmount` are `ENOSYS`; systemd
+  and util-linux fall back to `mount(2)`.
+
+Gaps: no mount namespaces (a service's private mounts are global);
+emulated mounts are invisible to processes outside the session.
 
 ## Fake cgroup v2 (`--cgroup`)
 Code: `src/cgroup.c`. Requires `--init`-style startup; set up in main
@@ -69,14 +105,12 @@ BSS.
 ## Known boot failures
 
 Debian sid's systemd 257 reaches `multi-user.target` (journald, udevd,
-networkd, logind, dbus, getty run).
-- `.mount` units for real filesystems (tmp, mqueue, hugepages, debugfs,
-  fusectl) exit 32: `mount(8)` gets `EPERM`.
-- binfmt_misc automount fails.
+networkd, logind, dbus, getty run; `tmp.mount`, `run-lock.mount`,
+`dev-mqueue.mount` mount).
 - `systemd-firstboot` waits on the console when `/etc/machine-id` is
   unset; the rootfs needs its first-boot settings done or the unit masked.
 - `/run/initctl` and `/run/systemd/journal/dev-log` symlinks into a
-  host-bound `/dev` fail `EACCES` (harmless).
-- `systemd-networkd-persistent-storage` and `systemd-resolved` fail
-  (not yet investigated).
-- Hazard: no pid isolation, so a guest `kill(-1)` reaches app processes.
+  host-bound `/dev` fail `EACCES` (harmless); `getty@tty1` can't open
+  the host's `/dev/tty1`.
+- `systemd-resolved` fails (not yet investigated); `sethostname` is
+  `EPERM`.

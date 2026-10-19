@@ -26,9 +26,9 @@ long tawcroot_install_filter(const int *trap_nrs, size_t n_traps);
  * filter. Returns 0 / -errno. */
 long tawcroot_install_lazy_filter(const int *trap_nrs, size_t n_traps);
 
-/* Stack a filter trapping `nr` only when args[0] >= the reserved fd
+/* Stack a filter trapping `nr` only when args[arg] >= the reserved fd
  * floor, like close in the base filter. Returns 0 / -errno. */
-long tawcroot_install_fd_floor_filter(int nr);
+long tawcroot_install_fd_floor_filter(int nr, int arg);
 
 /* Sets PR_SET_NO_NEW_PRIVS, the prerequisite for unprivileged seccomp. */
 long tawcroot_set_no_new_privs(void);

@@ -134,6 +134,8 @@ static bool build_rootfs(void)
 		  "static_init_check" },
 		{ TAWCROOT_STATIC_CGROUP_CHECK_BIN,
 		  "static_cgroup_check" },
+		{ TAWCROOT_STATIC_MOUNT_CHECK_BIN,
+		  "static_mount_check" },
 	};
 	for (size_t i = 0; i < sizeof fixtures / sizeof fixtures[0]; i++) {
 		snprintf(p, sizeof p, "%s/bin/%s",
@@ -645,6 +647,41 @@ test(prod_init_session)
 	test_true(build_rootfs());
 	const char *args[] = {
 		"-r", FAKE_ROOTFS, "--init", "--", "/bin/static_init_check", NULL
+	};
+	test_int_eq(run_with(args), 42);
+	rh_rmrf(FAKE_ROOTFS);
+}
+
+/* A process outside the session (the test runner's other child) is
+ * invisible and unsignalable from the guest, kill(-1) included. */
+test(prod_init_pid_isolation)
+{
+	rh_rmrf(FAKE_ROOTFS);
+	test_true(build_rootfs());
+	pid_t host = fork();
+	test_true(host >= 0);
+	if (host == 0) { for (;;) pause(); }
+	char pid[24];
+	snprintf(pid, sizeof pid, "%d", (int)host);
+	const char *args[] = {
+		"-r", FAKE_ROOTFS, "--init", "--", "/bin/static_init_check", pid, NULL
+	};
+	int rc = run_with(args);
+	int alive = waitpid(host, 0, WNOHANG) == 0;
+	kill(host, SIGKILL);
+	waitpid(host, 0, 0);
+	test_int_eq(rc, 42);
+	test_true(alive);
+	rh_rmrf(FAKE_ROOTFS);
+}
+
+test(prod_init_mounts)
+{
+	rh_rmrf(FAKE_ROOTFS);
+	test_true(build_rootfs());
+	const char *args[] = {
+		"-r", FAKE_ROOTFS, "-b", "/proc:/proc", "--init", "--",
+		"/bin/static_mount_check", NULL
 	};
 	test_int_eq(run_with(args), 42);
 	rh_rmrf(FAKE_ROOTFS);

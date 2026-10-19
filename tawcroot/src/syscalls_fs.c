@@ -35,6 +35,7 @@
 #include <sys/stat.h>
 
 #include "cgroup.h"
+#include "mounts.h"
 #include "dispatch.h"
 #include "errno_neg.h"
 #include "gamepad.h"
@@ -278,6 +279,8 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	if (nsfd != TAWC_ENOSYS) return nsfd;
 	if (tawcroot_namespace.init_pid) {
 		long pf = tawcroot_namespace_proc_open(path, flags);
+		if (pf != TAWC_ENOSYS) return pf;
+		pf = tawcroot_mounts_proc_open(path, flags);
 		if (pf != TAWC_ENOSYS) return pf;
 	}
 	if (cgroup_on()) {
@@ -703,6 +706,8 @@ static long handle_newfstatat(const tawcroot_syscall_args *args,
 	if (rv == 0) {
 		int pad = tawcroot_gamepad_path_slot(dirfd, scratch->buf[0]);
 		if (pad >= 0) tawcroot_gamepad_stat(out, pad);
+		if (tawcroot_namespace_is_userns_link(scratch->buf[0]))
+			out->st_ino = TAWCROOT_FAKE_USERNS_INO;
 		if (pmode == TAWCROOT_PATH_NOFOLLOW)
 			(void)stat_fixup_emulated(t.fd, t.path, out);
 		else
@@ -1969,6 +1974,8 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 			out->stx_rdev_minor = 192 + pad;
 			out->stx_ino = 0x41520000u + pad;
 		}
+		if (tawcroot_namespace_is_userns_link(scratch->buf[0]))
+			out->stx_ino = TAWCROOT_FAKE_USERNS_INO;
 	}
 	/* Hardlink emulation — same two fixups as handle_newfstatat:
 	 * NOFOLLOW leaf that is an emulated name → statx the object and
@@ -2906,6 +2913,12 @@ static long handle_statfs(const tawcroot_syscall_args *args, ucontext_t *uc)
 			   0, 0, 0, 0);
 	if (rv != 0) return rv;
 	if (t.ro) local.f_flags |= TAWC_ST_RDONLY;
+	long mm = tawcroot_mounts_magic(t.fd);
+	if (mm) local.f_type = mm;
+	/* /proc/sys is read-only in a container; inits key off that. */
+	if ((tawcroot_namespace.session & TAWC_NS_INIT_SESSION) && local.f_type == 0x9fa0 &&
+	    t.path && (tawc_streq(t.path, "sys") || tawc_starts_with(t.path, "sys/")))
+		local.f_flags |= TAWC_ST_RDONLY;
 	if (cgroup_on() &&
 	    tawcroot_cgroup_locate(t.fd, t.path, scratch->buf[3], TAWCROOT_PATH_SCRATCH_SIZE))
 		local.f_type = TAWCROOT_CGROUP2_SUPER_MAGIC;

@@ -119,7 +119,8 @@ static const struct tawcroot_bind *route_through_binds(
 		const struct tawcroot_bind *b = &binds[i];
 		if (!b->active) continue;
 		if (!prefix_component(suf, b->dst, b->dst_len)) continue;
-		if (!best || b->dst_len > best->dst_len) best = b;
+		/* Ties go to the later bind: a mount over a mount wins. */
+		if (!best || b->dst_len >= best->dst_len) best = b;
 	}
 	if (!best) return 0;
 	if (best->leaf[0]) {

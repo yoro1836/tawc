@@ -84,10 +84,11 @@ int main(void)
 	if (rmdir(CG "/a") != 0) return 22;
 	if (access(CG "/a", F_OK) == 0) return 23;
 
-	/* Init session mounts: API points pretend, others refuse, and
-	 * umount says "not a mount point" so loops terminate. */
+	/* Init session mounts: API points pretend, unknown filesystems
+	 * refuse, and umount of a non-mount says "not a mount point" so
+	 * loops terminate. */
 	if (mount("tmpfs", "/run", "tmpfs", 0, 0) != 0) return 30;
-	if (mount("tmpfs", "/bin", "tmpfs", 0, 0) == 0 || errno != EPERM)
+	if (mount("none", "/bin", "debugfs", 0, 0) == 0 || errno != EPERM)
 		return 31;
 	if (umount2("/run", 0) == 0 || errno != EINVAL) return 32;
 	return 42;

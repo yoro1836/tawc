@@ -101,13 +101,13 @@ long tawcroot_install_lazy_filter(const int *trap_nrs, size_t n_traps)
 	return rv;
 }
 
-long tawcroot_install_fd_floor_filter(int nr)
+long tawcroot_install_fd_floor_filter(int nr, int arg)
 {
 	uint64_t ip = (uint64_t)(uintptr_t)&tawcroot_raw_syscall_ret[0];
 	struct sock_filter prog[] = {
 		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 0),
 		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)nr, 0, 7),
-		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 16),
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (uint32_t)(16 + 8 * arg)),
 		BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, TAWCROOT_RESERVED_FD_BASE, 0, 5),
 		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 8),
 		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)ip, 0, 2),

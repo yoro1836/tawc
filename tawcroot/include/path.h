@@ -163,6 +163,9 @@ struct tawcroot_bind {
 	                              * the new tawcroot can re-open it.
 	                              * Stable across chroot — host fs doesn't
 	                              * move.                                 */
+	unsigned mount_id;           /* nonzero: mirrors entry `mount_id` of
+	                              * the shared mount table (mounts.c);
+	                              * never ferried through exec.           */
 };
 
 extern struct tawcroot_bind tawcroot_binds[TAWCROOT_MAX_BINDS];
@@ -187,6 +190,11 @@ extern int tawcroot_root_ro;
  * the bind RO (write-intent translations into it are -EROFS). */
 long tawcroot_path_add_bind(const char *src_host, const char *dst_guest,
                             int read_only);
+
+/* tawcroot_path_add_bind into a given slot, which must be inactive;
+ * the slot is published (active = 1) last. */
+long tawcroot_path_fill_bind(struct tawcroot_bind *b, const char *src_host,
+			     const char *dst_guest, int read_only);
 
 /* Startup-only, process-local bind. Both names are resolved in the
  * current guest view; no kernel mount or namespace is created. */

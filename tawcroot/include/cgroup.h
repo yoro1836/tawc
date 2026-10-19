@@ -26,4 +26,7 @@ long tawcroot_cgroup_write(int fd, const void *buf, size_t len);
 /* /proc/self/cgroup, /proc/<pid>/cgroup: a synthesized fd, or TAWC_ENOSYS. */
 long tawcroot_cgroup_proc_open(const char *path, int flags);
 
+/* Empty a host directory (setup-time; not thread-safe). */
+void tawcroot_wipe_dir(int dirfd);
+
 #define TAWCROOT_CGROUP2_SUPER_MAGIC 0x63677270

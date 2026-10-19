@@ -300,6 +300,11 @@ static void wipe(int dirfd, int depth)
     }
 }
 
+void tawcroot_wipe_dir(int dirfd)
+{
+    wipe(dirfd, 0);
+}
+
 long tawcroot_cgroup_setup(void)
 {
     TAWCROOT_PATH_SCRATCH_AUTO(scratch);
@@ -424,7 +429,7 @@ static struct { int fd, kind; unsigned long dev, ino; char dir[240]; } wfds[16];
 static long ensure_write_trap(void)
 {
     if (tawcroot_namespace.session & TAWC_NS_CG_WRITE_TRAP) return 0;
-    long e = tawcroot_install_fd_floor_filter(TAWC_SYS_write);
+    long e = tawcroot_install_fd_floor_filter(TAWC_SYS_write, 0);
     if (!e) tawcroot_namespace.session |= TAWC_NS_CG_WRITE_TRAP;
     return e;
 }
