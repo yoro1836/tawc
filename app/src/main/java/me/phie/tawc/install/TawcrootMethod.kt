@@ -511,7 +511,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
                 addAll(listOf("--init", "--cgroup", "--", "/usr/bin/env", "-i", "container=tawc", initBin))
             }
             console.writeText("")
-            val proc = ProcessBuilder(argv)
+            val builder = ProcessBuilder(argv)
                 .directory(File(tmpdir))
                 .redirectErrorStream(true)
                 .redirectOutput(ProcessBuilder.Redirect.appendTo(console))
@@ -519,17 +519,29 @@ class TawcrootMethod(context: Context) : InstallationMethod {
                     it.environment().clear()
                     it.environment()["TMPDIR"] = tmpdir
                 }
-                .start()
-            inits[rootfs] = proc
-            val hold = SessionHolds.acquire(Reason.Command("systemd"))
-            thread(name = "tawc-systemd-wait", isDaemon = true) {
+            // Fork from a thread that outlives the init: tawcroot's
+            // PDEATHSIG fires when the forking *thread* exits, and
+            // spawns often come from short-lived worker threads.
+            val started = java.util.concurrent.SynchronousQueue<Result<Process>>()
+            thread(name = "tawc-systemd", isDaemon = true) {
+                val proc = try {
+                    builder.start()
+                } catch (t: Throwable) {
+                    started.put(Result.failure(t))
+                    return@thread
+                }
+                val hold = SessionHolds.acquire(Reason.Command("systemd"))
+                started.put(Result.success(proc))
                 try {
-                    proc.waitFor()
-                } catch (_: InterruptedException) {
+                    val code = proc.waitFor()
+                    console.appendText("tawc: systemd exited with status $code\n")
+                } catch (_: Throwable) {
                 } finally {
                     hold.release()
                 }
             }
+            val proc = started.take().getOrThrow()
+            inits[rootfs] = proc
             // tawcroot publishes the session before exec'ing systemd.
             val deadline = System.nanoTime() + INIT_PUBLISH_TIMEOUT_NANOS
             while (!record.exists() && proc.isAlive && System.nanoTime() < deadline) Thread.sleep(20)
