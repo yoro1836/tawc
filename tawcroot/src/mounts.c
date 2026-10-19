@@ -754,7 +754,12 @@ long tawcroot_mounts_epoll_ctl(const tawcroot_syscall_args *a, ucontext_t *uc)
         if (r < 0) { tawc_close((int)in); return r; }
         g_watch[i].sub = (int)r;
     }
+    /* The kernel's struct epoll_event is packed only on x86_64. */
+#if defined(__x86_64__)
     struct { uint32_t events; uint64_t data; } __attribute__((packed)) ev;
+#else
+    struct { uint32_t events; uint64_t data; } ev;
+#endif
     long evp = 0;
     if (a->b != 2 /*EPOLL_CTL_DEL*/) {
         long e = tawc_copy_from_guest(&ev, sizeof ev, (const void *)(uintptr_t)a->d);
