@@ -144,6 +144,7 @@ build_static_c static_namespace_check
 build_static_c static_init_check
 build_static_c static_cgroup_check
 build_static_c static_mount_check
+build_static_c static_net_check
 build_dynamic dynamic_exit42
 build_dynamic dynamic_argv_check
 build_dynamic dynamic_legacy_nr_probe

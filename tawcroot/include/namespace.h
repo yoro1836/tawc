@@ -12,7 +12,8 @@ struct tawc_namespace {
 #define TAWC_NS_INIT_SESSION 1u
 #define TAWC_NS_CGROUP 2u        /* --cgroup: fake cgroupfs (cgroup.h) */
 #define TAWC_NS_CG_WRITE_TRAP 4u /* write() on fds >= the reserved floor traps */
-#define TAWC_NS_EPOLL_TRAP 8u    /* epoll_ctl() on fds >= the floor traps (mounts.c) */
+#define TAWC_NS_EPOLL_TRAP 8u
+#define TAWC_NS_RECV_TRAP 16u     /* recv* on fds >= the floor trap (ports.c) */    /* epoll_ctl() on fds >= the floor traps (mounts.c) */
 extern struct tawc_namespace tawcroot_namespace;
 void tawcroot_namespace_register(void);
 void tawcroot_namespace_restore(void);
@@ -33,4 +34,9 @@ int tawcroot_namespace_is_userns_link(const char *path);
 int tawcroot_namespace_is_guest(long pid);
 /* In a child of the init: SIGKILL it when the init dies. */
 void tawcroot_namespace_tie_to_init(void);
+/* Init sessions: per-process virtual ids for SO_PEERCRED. */
+void tawcroot_namespace_ids_setup(void);
+void tawcroot_namespace_publish_ids(uint32_t uid, uint32_t gid);
+/* 1 with `pid`'s virtual uid/gid filled in, 0 outside init sessions. */
+int tawcroot_namespace_peer_ids(long pid, uint32_t *uid, uint32_t *gid);
 int tawcroot_namespace_probe(const char *path);

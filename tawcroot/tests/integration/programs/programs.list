@@ -45,6 +45,7 @@ static_namespace_check
 static_init_check
 static_cgroup_check
 static_mount_check
+static_net_check
 dynamic_exit42
 dynamic_argv_check
 dynamic_big_stack

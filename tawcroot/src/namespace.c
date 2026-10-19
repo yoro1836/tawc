@@ -8,12 +8,15 @@
 #include "namespace.h"
 #include "cgroup.h"
 #include "mounts.h"
+#include "uts.h"
+#include "ports.h"
 #include "chroot.h"
 #include "dispatch.h"
 #include "errno_neg.h"
 #include "fdtab.h"
 #include "filter.h"
 #include "io.h"
+#include "linkstore.h"
 #include "path_scratch.h"
 #include "raw_sys.h"
 #include "tawc_string.h"
@@ -370,7 +373,7 @@ long tawcroot_namespace_init_session(void)
     /* A real init starts with every capability; services drop from
      * there. Emulated like a user namespace's (namespace_cap). */
     struct tawc_namespace *ns = &tawcroot_namespace;
-    static const int init_lazy[] = { TAWC_SYS_fstatfs };
+    static const int init_lazy[] = { TAWC_SYS_fstatfs, TAWC_SYS_uname, __NR_sethostname, __NR_setdomainname };
     r = tawcroot_install_lazy_filter(init_lazy, sizeof init_lazy / sizeof init_lazy[0]);
     if (r) return r;
     ns->session |= TAWC_NS_INIT_SESSION;
@@ -459,14 +462,23 @@ static long namespace_cap(const tawcroot_syscall_args *a, ucontext_t *uc)
         return TAWC_RAW(a->nr, a->a, a->b, 0, 0, 0, 0);
     struct __user_cap_header_struct header;
     if (tawc_copy_from_guest(&header, sizeof header, (void *)a->a) < 0) return TAWC_EFAULT;
-    if (header.version != _LINUX_CAPABILITY_VERSION_3 && header.version != _LINUX_CAPABILITY_VERSION_2)
+    /* Like the kernel: an unknown version (libcap-ng probes with 0)
+     * gets the preferred one written back, and v1 is one 32-bit set. */
+    size_t words = header.version == _LINUX_CAPABILITY_VERSION_1 ? 3 : 6;
+    if (words == 6 && header.version != _LINUX_CAPABILITY_VERSION_3 &&
+        header.version != _LINUX_CAPABILITY_VERSION_2) {
+        header.version = _LINUX_CAPABILITY_VERSION_3;
+        if (tawc_copy_to_guest((void *)a->a, &header.version, sizeof header.version) < 0)
+            return TAWC_EFAULT;
         return TAWC_EINVAL;
+    }
     if (header.pid && header.pid != tawc_getpid() &&
         !(header.pid == 1 && tawcroot_namespace.init_pid == tawc_getpid())) return TAWC_ESRCH;
     if (a->nr == __NR_capget)
-        return tawc_copy_to_guest((void *)a->b, tawcroot_namespace.capabilities, sizeof tawcroot_namespace.capabilities);
+        return a->b ? tawc_copy_to_guest((void *)a->b, tawcroot_namespace.capabilities, words * 4) : 0;
     uint32_t next[6];
-    if (tawc_copy_from_guest(next, sizeof next, (void *)a->b) < 0) return TAWC_EFAULT;
+    memset(next, 0, sizeof next);
+    if (tawc_copy_from_guest(next, words * 4, (void *)a->b) < 0) return TAWC_EFAULT;
     for (int i = 0; i < 6; i += 3)
         if ((next[i] & ~next[i+1]) || (next[i+1] & ~tawcroot_namespace.capabilities[i+1]) ||
             (next[i+2] & ~(tawcroot_namespace.capabilities[i+2] | tawcroot_namespace.capabilities[i+1])))
@@ -710,6 +722,106 @@ static long namespace_signal(const tawcroot_syscall_args *a, ucontext_t *uc)
     }
 }
 
+/* --- peer identities ----------------------------------------------------
+ * Every guest has the app's real uid, so SO_PEERCRED can't tell services
+ * apart (dbus-daemon checks who owns a bus name). In init sessions each
+ * process that changes its virtual ids records them in <store>/ids/<pid>,
+ * keyed by starttime so a recycled pid reads as unknown; a peer without
+ * a record has its nearest recorded ancestor's ids, else root's. */
+
+struct ids_rec { uint64_t start; uint32_t uid, gid; };
+
+static long ids_path(char *out, size_t cap, long pid)
+{
+    size_t n = 0;
+    if (!tawcroot_store_host_path_len ||
+        tawc_str_append(out, cap, &n, tawcroot_store_host_path) ||
+        tawc_str_append(out, cap, &n, "/ids") ||
+        (pid && (tawc_str_append(out, cap, &n, "/") ||
+                 tawc_str_append_dec(out, cap, &n, pid))))
+        return TAWC_ENAMETOOLONG;
+    return 0;
+}
+
+/* starttime (field 22) and ppid of `pid`. */
+static long stat_start(long pid, uint64_t *start, long *ppid)
+{
+    char buf[512];
+    size_t n = 0;
+    if (tawc_str_append(buf, sizeof buf, &n, "/proc/") ||
+        tawc_str_append_dec(buf, sizeof buf, &n, pid) ||
+        tawc_str_append(buf, sizeof buf, &n, "/stat")) return TAWC_ESRCH;
+    long fd = tawc_openat(AT_FDCWD, buf, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) return TAWC_ESRCH;
+    long len = tawc_read((int)fd, buf, sizeof buf - 1);
+    tawc_close((int)fd);
+    if (len <= 0) return TAWC_ESRCH;
+    buf[len] = 0;
+    const char *p = 0;
+    for (long i = 0; i < len; ++i) if (buf[i] == ')') p = buf + i + 1;
+    if (!p) return TAWC_ESRCH;
+    int field = 2;
+    uint64_t v = 0;
+    for (; *p; ++p) {
+        if (*p == ' ') { ++field; v = 0; continue; }
+        v = v * 10 + (uint64_t)(*p - '0');
+        if (field == 4 && p[1] == ' ') *ppid = (long)v;
+        if (field == 22 && (p[1] == ' ' || !p[1])) { *start = v; return 0; }
+    }
+    return TAWC_ESRCH;
+}
+
+void tawcroot_namespace_ids_setup(void)
+{
+    char path[512];
+    if (ids_path(path, sizeof path, 0)) return;
+    (void)TAWC_RAW(TAWC_SYS_mkdirat, AT_FDCWD, (long)path, 0700, 0, 0, 0);
+    long dir = tawc_openat(AT_FDCWD, path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW, 0);
+    if (dir < 0) return;
+    tawcroot_wipe_dir((int)dir);
+    tawc_close((int)dir);
+}
+
+void tawcroot_namespace_publish_ids(uint32_t uid, uint32_t gid)
+{
+    if (!(tawcroot_namespace.session & TAWC_NS_INIT_SESSION)) return;
+    char path[512];
+    long self = TAWC_RAW(TAWC_SYS_getpid, 0, 0, 0, 0, 0, 0), ppid;
+    struct ids_rec r = { 0, uid, gid };
+    if (ids_path(path, sizeof path, self) || stat_start(self, &r.start, &ppid)) return;
+    long fd = tawc_openat(AT_FDCWD, path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) return;
+    (void)tawc_write((int)fd, &r, sizeof r);
+    tawc_close((int)fd);
+}
+
+int tawcroot_namespace_peer_ids(long pid, uint32_t *uid, uint32_t *gid)
+{
+    *uid = *gid = 0;
+    if (!(tawcroot_namespace.session & TAWC_NS_INIT_SESSION)) return 0;
+    for (int depth = 0; pid > 1 && depth < 64; ++depth) {
+        char path[512];
+        uint64_t start;
+        long ppid = 0;
+        if (stat_start(pid, &start, &ppid)) return 1;
+        struct ids_rec r;
+        long fd = ids_path(path, sizeof path, pid) ? -1 :
+            tawc_openat(AT_FDCWD, path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW, 0);
+        if (fd >= 0) {
+            long got = tawc_read((int)fd, &r, sizeof r);
+            tawc_close((int)fd);
+            if (got == (long)sizeof r && r.start == start) {
+                *uid = r.uid;
+                *gid = r.gid;
+                return 1;
+            }
+        }
+        if (pid == tawcroot_namespace.init_pid) break;
+        pid = ppid;
+    }
+    return 1;
+}
+
 void tawcroot_namespace_register(void)
 {
     tawcroot_dispatch_install(TAWC_SYS_clone, clone_namespace);
@@ -726,6 +838,12 @@ void tawcroot_namespace_register(void)
     tawcroot_dispatch_install_lazy(__NR_epoll_ctl, tawcroot_mounts_epoll_ctl);
     tawcroot_dispatch_install_lazy(TAWC_SYS_fstatfs, tawcroot_mounts_fstatfs);
     tawcroot_dispatch_install_lazy(__NR_rt_tgsigqueueinfo, namespace_signal);
+    tawcroot_dispatch_install_lazy(TAWC_SYS_uname, tawcroot_uts_syscall);
+    tawcroot_dispatch_install_lazy(__NR_sethostname, tawcroot_uts_syscall);
+    tawcroot_dispatch_install_lazy(__NR_setdomainname, tawcroot_uts_syscall);
+    tawcroot_dispatch_install_lazy(TAWC_SYS_recvfrom, tawcroot_ports_recv);
+    tawcroot_dispatch_install_lazy(TAWC_SYS_recvmsg, tawcroot_ports_recv);
+    tawcroot_dispatch_install_lazy(__NR_recvmmsg, tawcroot_ports_recv);
     /* Kernels with a broken pidfd_open keep their base-filter deny. */
     if (!tawcroot_dispatch_get(TAWC_SYS_pidfd_open))
         tawcroot_dispatch_install_lazy(TAWC_SYS_pidfd_open, namespace_signal);
