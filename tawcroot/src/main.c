@@ -45,6 +45,7 @@
 #include "identity.h"
 #include "sysnr.h"
 #include "linkstore.h"
+#include "namespace.h"
 #include "loader_exec.h"
 #include "path.h"
 #include "pathcache.h"
@@ -218,7 +219,7 @@ static __attribute__((noreturn)) void usage(int code)
 	            "  tawcroot-testhost -r ROOTFS [-b SRC:DST[:ro]]...\n");
 #else
 	tawc_io_str("tawcroot: usage:\n"
-	            "  tawcroot -r ROOTFS [--host-user] [-b SRC:DST[:ro]]... -- CMD [ARGS...]\n"
+	            "  tawcroot -r ROOTFS [--host-user] [--init] [-b SRC:DST[:ro]]... -- CMD [ARGS...]\n"
 	            "  tawcroot --exec-child <fd>\n");
 #endif
 	tawc_exit_group(code);
@@ -464,6 +465,7 @@ __attribute__((noreturn)) static void prod_main(int argc, char **argv)
 	size_t      n_binds   = 0;
 	int         cmd_start = -1;
 	int         host_user = 0;
+	int         init      = 0;
 
 	int i = 1;
 	while (i < argc) {
@@ -474,6 +476,9 @@ __attribute__((noreturn)) static void prod_main(int argc, char **argv)
 			i++;
 		} else if (tawc_streq(argv[i], "--host-user")) {
 			host_user = 1;
+			i++;
+		} else if (tawc_streq(argv[i], "--init")) {
+			init = 1;
 			i++;
 		} else if (tawc_streq(argv[i], "-b")) {
 			if (i + 1 >= argc) usage(2);
@@ -493,6 +498,10 @@ __attribute__((noreturn)) static void prod_main(int argc, char **argv)
 	if (!rootfs || cmd_start < 0 || cmd_start >= argc) usage(2);
 
 	prod_rootfs_init(rootfs, bind_specs, n_binds);
+	if (init && tawcroot_namespace_init_session() < 0) {
+		tawc_io_str("tawcroot: --init setup failed\n");
+		tawc_exit_group(96);
+	}
 	if (host_user) {
 		tawc_identity id = { 0 };
 		id.ruid = id.euid = id.suid = id.fsuid = (uint32_t)tawc_getuid();

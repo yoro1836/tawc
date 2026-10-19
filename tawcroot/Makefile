@@ -319,6 +319,12 @@ $(OUT)/programs/static_namespace_check: $(SRC_TS)/integration/programs/static_na
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -static -Wl,--build-id=none $< -o $@
 
+# static_init_check: static C (libc.a) — `--init` fake pid 1, orphan
+# adoption and init signal semantics. See the source for exit codes.
+$(OUT)/programs/static_init_check: $(SRC_TS)/integration/programs/static_init_check.c | $(OUT)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -static -Wl,--build-id=none $< -o $@
+
 # dynamic_exit42: ET_DYN linked against the host's glibc. The phase
 # 2.5 smoke loads both this binary AND its PT_INTERP-pointed ld.so,
 # synthesizes the right auxv, and jumps to ld.so. Success = ld.so ran

@@ -10,5 +10,7 @@ struct tawc_namespace {
 extern struct tawc_namespace tawcroot_namespace;
 void tawcroot_namespace_register(void);
 void tawcroot_namespace_restore(void);
+/* `--init`: the session's first guest process is pid 1. */
+long tawcroot_namespace_init_session(void);
 long tawcroot_namespace_open(const char *path, int flags);
 int tawcroot_namespace_probe(const char *path);
