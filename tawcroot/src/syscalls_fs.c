@@ -1155,8 +1155,20 @@ static long handle_faccessat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	 * plain faccessat ignores flags. -ENOSYS makes glibc/musl fall
 	 * back to their own AT_SYMLINK_NOFOLLOW / AT_EACCESS emulation
 	 * on top of syscalls we do translate. */
-	if (args->nr == TAWC_SYS_faccessat2 && (int)args->d != 0)
-		return TAWC_ENOSYS;
+	if (args->nr == TAWC_SYS_faccessat2 && (int)args->d != 0) {
+		/* Except access on the fd itself (systemd 262 checks its
+		 * executor binary this way, and fails to boot on ENOSYS):
+		 * plain faccessat through its /proc/self/fd link. */
+		char c = 1;
+		int flags = (int)args->d;
+		if (!(flags & AT_EMPTY_PATH) || (flags & ~(AT_EMPTY_PATH | AT_EACCESS)) ||
+		    tawc_copy_from_guest(&c, 1, gpath) < 0 || c)
+			return TAWC_ENOSYS;
+		char link[64];
+		long e = tawc_proc_fd_path(link, sizeof link, dirfd, "");
+		if (e < 0) return e;
+		return TAWC_RAW(TAWC_SYS_faccessat, AT_FDCWD, (long)link, mode, 0, 0, 0);
+	}
 
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
 	long fe = fetch_guest_path(scratch, 0, gpath);
@@ -2918,9 +2930,12 @@ static long handle_statfs(const tawcroot_syscall_args *args, ucontext_t *uc)
 	if (t.ro) local.f_flags |= TAWC_ST_RDONLY;
 	long mm = tawcroot_mounts_magic(t.fd);
 	if (mm) local.f_type = mm;
-	/* /proc/sys is read-only in a container; inits key off that. */
-	if ((tawcroot_namespace.session & TAWC_NS_INIT_SESSION) && local.f_type == 0x9fa0 &&
-	    t.path && (tawc_streq(t.path, "sys") || tawc_starts_with(t.path, "sys/")))
+	/* /proc/sys and /sys are read-only in a container; inits key off
+	 * that (systemd then keeps /dev/console, not the host console). */
+	if ((tawcroot_namespace.session & TAWC_NS_INIT_SESSION) &&
+	    (local.f_type == 0x62656572 /*SYSFS_MAGIC*/ ||
+	     (local.f_type == 0x9fa0 && t.path &&
+	      (tawc_streq(t.path, "sys") || tawc_starts_with(t.path, "sys/")))))
 		local.f_flags |= TAWC_ST_RDONLY;
 	if (cgroup_on() &&
 	    tawcroot_cgroup_locate(t.fd, t.path, scratch->buf[3], TAWCROOT_PATH_SCRATCH_SIZE))

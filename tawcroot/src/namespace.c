@@ -710,7 +710,7 @@ static long namespace_signal(const tawcroot_syscall_args *a, ucontext_t *uc)
 {
     (void)uc;
     long init = tawcroot_namespace.init_pid;
-    long pid = a->a, tid = a->b;
+    long pid = (int)a->a, tid = (int)a->b;   /* pid_t: upper bits are junk */
     if (init && pid == 1) pid = init;
     if (init && tid == 1 && (a->nr == __NR_tgkill || a->nr == __NR_rt_tgsigqueueinfo)) tid = init;
     if (!init) return TAWC_RAW(a->nr, a->a, a->b, a->c, a->d, 0, 0);

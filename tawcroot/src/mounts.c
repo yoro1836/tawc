@@ -463,7 +463,203 @@ long tawcroot_mounts_umount(const char *gtarget, int flags)
     return i >= 0 ? 0 : TAWC_ENOSYS;
 }
 
+/* --- new mount API ------------------------------------------------------- */
+
+/* fsopen/fsconfig/fsmount/move_mount for the filesystems mount(2)
+ * emulates; systemd mounts credentials this way. fsopen gives a memfd
+ * holding a struct fsctx; fsmount creates the backing directory and
+ * returns an O_PATH fd on it; move_mount of that fd adds the entry.
+ * Other types get ENOSYS, which sends libmount back to mount(2). */
+#define FSCTX_MAGIC 0x46534358
+#define FSCTX_NAME "tawcroot-fsctx"
+struct fsctx { uint32_t magic, id, ro; char type[8], mode[8], source[64]; };
+/* fsmount'ed but not yet attached, in this process. */
+static struct { uint32_t id, ro; char type[8], source[64]; } g_detached[4];
+
+/* The context fd is O_PATH on a memfd: reads fail like a kernel
+ * fs_context's with no messages (libmount drains it until -1). */
+static long fsctx_io(int fd, struct fsctx *c, int write)
+{
+    char link[64];
+    if (tawc_proc_fd_path(link, sizeof link, fd, 0) < 0) return TAWC_EIO;
+    long rw = tawc_openat(AT_FDCWD, link, (write ? O_WRONLY : O_RDONLY) | O_CLOEXEC, 0);
+    if (rw < 0) return rw;
+    long n = write ? TAWC_RAW(TAWC_SYS_pwrite64, rw, (long)c, sizeof *c, 0, 0, 0)
+                   : tawc_pread64((int)rw, c, sizeof *c, 0);
+    tawc_close((int)rw);
+    return n == (long)sizeof *c ? 0 : TAWC_EIO;
+}
+
+static int fsctx_load(int fd, struct fsctx *c)
+{
+    char link[64], name[64];
+    if (tawc_proc_fd_path(link, sizeof link, fd, 0) < 0) return 0;
+    long n = TAWC_RAW(TAWC_SYS_readlinkat, AT_FDCWD, (long)link, (long)name, sizeof name - 1, 0, 0);
+    if (n < 0) return 0;
+    name[n] = 0;
+    return tawc_starts_with(name, "/memfd:" FSCTX_NAME) && !fsctx_io(fd, c, 0) &&
+           c->magic == FSCTX_MAGIC;
+}
+
+static long fsctx_save(int fd, const struct fsctx *c)
+{
+    return fsctx_io(fd, (struct fsctx *)c, 1);
+}
+
+static long fs_open(const char *gname, unsigned flags)
+{
+    struct fsctx c;
+    memset(&c, 0, sizeof c);
+    if (!gname || tawc_copy_string_from_guest(c.type, sizeof c.type, gname) < 0 ||
+        (!tawc_streq(c.type, "tmpfs") && !tawc_streq(c.type, "ramfs")))
+        return TAWC_ENOSYS;
+    c.magic = FSCTX_MAGIC;
+    (void)tawc_str_copy(c.source, sizeof c.source, c.type);
+    long mfd = tawc_memfd_create(FSCTX_NAME, 1);
+    if (mfd < 0) return mfd;
+    long e = TAWC_RAW(TAWC_SYS_pwrite64, mfd, (long)&c, sizeof c, 0, 0, 0);
+    char link[64];
+    long fd = e != (long)sizeof c ? TAWC_EIO : tawc_proc_fd_path(link, sizeof link, (int)mfd, 0);
+    if (fd >= 0)
+        fd = tawc_openat(AT_FDCWD, link, O_PATH | ((flags & 1 /*FSOPEN_CLOEXEC*/) ? O_CLOEXEC : 0), 0);
+    tawc_close((int)mfd);
+    return fd;
+}
+
+static long fs_config(int fd, unsigned cmd, const char *gkey, const char *gval)
+{
+    struct fsctx c;
+    char key[16];
+    if (!fsctx_load(fd, &c)) return TAWC_EINVAL;
+    if (cmd == 7 /*CMD_RECONFIGURE*/ && c.id) {
+        for (int i = 0; i < 4; ++i)
+            if (g_detached[i].id == c.id) g_detached[i].ro = c.ro;
+        long lk = lock(2 /*LOCK_EX*/);
+        if (lk < 0) return lk;
+        for (int i = 0; i < MAX_MOUNTS; ++i)
+            if (g_tab->e[i].id == c.id && g_tab->e[i].ro != c.ro) {
+                g_tab->e[i].ro = c.ro;
+                bump();
+            }
+        tawc_close((int)lk);
+        return 0;
+    }
+    if (cmd > 1 || !gkey || tawc_copy_string_from_guest(key, sizeof key, gkey) < 0)
+        return 0;   /* commands, unknown keys: accepted */
+    if (cmd == 0 /*SET_FLAG*/ && (tawc_streq(key, "ro") || tawc_streq(key, "rw")))
+        c.ro = key[1] == 'o';
+    else if (cmd == 1 /*SET_STRING*/ && gval && tawc_streq(key, "mode"))
+        (void)tawc_copy_string_from_guest(c.mode, sizeof c.mode, gval);
+    else if (cmd == 1 && gval && tawc_streq(key, "source"))
+        (void)tawc_copy_string_from_guest(c.source, sizeof c.source, gval);
+    else
+        return 0;
+    return fsctx_save(fd, &c);
+}
+
+static long fs_mount(int fd, unsigned flags, unsigned attrs)
+{
+    struct fsctx c;
+    if (!fsctx_load(fd, &c)) return TAWC_EINVAL;
+    if (c.id) return TAWC_EBUSY;
+    int slot = 0;
+    while (slot < 4 && g_detached[slot].id) ++slot;
+    if (slot == 4) return TAWC_ENOSPC;
+    TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+    char *dir = scratch->buf[0], *data = scratch->buf[1];
+    size_t n = 0;
+    data[0] = 0;
+    if (c.mode[0]) {
+        (void)tawc_str_append(data, 32, &n, "mode=");
+        (void)tawc_str_append(data, 32, &n, c.mode);
+    }
+    long lk = lock(2 /*LOCK_EX*/);
+    if (lk < 0) return lk;
+    uint32_t id = g_tab->next_id++;
+    tawc_close((int)lk);
+    long e = new_backing(dir, id, data);
+    if (e < 0) return e;
+    long mfd = tawc_openat(AT_FDCWD, dir, O_PATH | O_DIRECTORY | ((flags & 1) ? O_CLOEXEC : 0), 0);
+    if (mfd < 0) return mfd;
+    c.id = id;
+    (void)fsctx_save(fd, &c);
+    g_detached[slot].id = id;
+    g_detached[slot].ro = c.ro || (attrs & 1 /*MOUNT_ATTR_RDONLY*/);
+    (void)tawc_str_copy(g_detached[slot].type, sizeof g_detached[slot].type, c.type);
+    (void)tawc_str_copy(g_detached[slot].source, sizeof g_detached[slot].source, c.source);
+    return mfd;
+}
+
+/* Detached slot whose backing directory `fd` is, or -1. */
+static int detached(int fd)
+{
+    TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+    char *host = scratch->buf[0], *want = scratch->buf[1];
+    if (tawcroot_proc_fd_to_host_path(fd, host, TAWCROOT_PATH_SCRATCH_SIZE) < 0) return -1;
+    for (int i = 0; i < 4; ++i) {
+        if (!g_detached[i].id || store_path(want, "/mnt/") < 0) continue;
+        size_t n = tawc_strlen(want);
+        if (!tawc_str_append_dec(want, TAWCROOT_PATH_SCRATCH_SIZE, &n, g_detached[i].id) &&
+            tawc_streq(host, want)) return i;
+    }
+    return -1;
+}
+
+static long move_detached(const tawcroot_syscall_args *a)
+{
+    unsigned flags = (unsigned)a->e;
+    char c = 1;
+    if (!(flags & 0x4 /*F_EMPTY_PATH*/) ||
+        tawc_copy_from_guest(&c, 1, (const void *)(uintptr_t)a->b) < 0 || c)
+        return TAWC_ENOSYS;
+    int i = detached((int)a->a);
+    if (i < 0) return TAWC_ENOSYS;
+    if (flags & 0x200 /*MOVE_MOUNT_BENEATH*/) return TAWC_EINVAL;
+    TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+    char *abs = scratch->buf[2], *src = scratch->buf[3];
+    long e;
+    if (flags & 0x40 /*T_EMPTY_PATH*/) {
+        e = tawcroot_fd_to_guest_abs((int)a->c, abs, TAWCROOT_PATH_SCRATCH_SIZE);
+    } else {
+        if (tawc_copy_from_guest(&c, 1, (const void *)(uintptr_t)a->d) < 0) return TAWC_EFAULT;
+        if ((int)a->c != AT_FDCWD && c != '/') return TAWC_EINVAL;
+        e = guest_target((const char *)(uintptr_t)a->d, abs, 1);
+    }
+    if (e < 0) return e;
+    if (store_path(src, "/mnt/") < 0) return TAWC_ENOENT;
+    size_t n = tawc_strlen(src);
+    (void)tawc_str_append_dec(src, TAWCROOT_PATH_SCRATCH_SIZE, &n, g_detached[i].id);
+    __atomic_add_fetch(&g_mounting, 1, __ATOMIC_ACQUIRE);
+    long lk = lock(2 /*LOCK_EX*/);
+    e = lk < 0 ? lk : add_entry(abs, src, g_detached[i].type, g_detached[i].source,
+                                (int)g_detached[i].ro, g_detached[i].id);
+    if (lk >= 0) tawc_close((int)lk);
+    __atomic_sub_fetch(&g_mounting, 1, __ATOMIC_RELEASE);
+    if (e) return e;
+    g_detached[i].id = 0;
+    notify();
+    return 0;
+}
+
+long tawcroot_mounts_new_api(const tawcroot_syscall_args *a, ucontext_t *uc)
+{
+    (void)uc;
+    if (!g_tab) return TAWC_ENOSYS;
+    tawcroot_mounts_sync();
+    switch (a->nr) {
+    case 430 /*fsopen*/:    return fs_open((const char *)(uintptr_t)a->a, (unsigned)a->b);
+    case 431 /*fsconfig*/:  return fs_config((int)a->a, (unsigned)a->b,
+                                           (const char *)(uintptr_t)a->c,
+                                           (const char *)(uintptr_t)a->d);
+    case 432 /*fsmount*/:   return fs_mount((int)a->a, (unsigned)a->b, (unsigned)a->c);
+    case 429 /*move_mount*/: return move_detached(a);
+    }
+    return TAWC_ENOSYS;
+}
+
 /* --- change notification ------------------------------------------------- */
+
+static const char MOUNTS_EVENT[] = "/mounts.event";
 
 /* Writers touch <store>/mounts.event after every change. Synthesized
  * mountinfo fds live at or above the reserved floor, where a stacked
@@ -471,13 +667,13 @@ long tawcroot_mounts_umount(const char *gtarget, int flags)
  * fd watching mounts.event, so libmount's monitor wakes like on a real
  * mount table change. Rendering drains those inotify fds first, so a
  * change after a render always wakes again. */
-static struct { int fd, sub; unsigned long ino; } g_watch[16];
+static struct { int fd, sub; unsigned long ino; const char *event; } g_watch[16];
 
 static void notify(void)
 {
     TAWCROOT_PATH_SCRATCH_AUTO(scratch);
     char *path = scratch->buf[0];
-    if (store_path(path, "/mounts.event") < 0) return;
+    if (store_path(path, MOUNTS_EVENT) < 0) return;
     long fd = tawc_openat(AT_FDCWD, path, O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (fd < 0) return;
     (void)TAWC_RAW(TAWC_SYS_pwrite64, fd, (long)"x", 1, 0, 0, 0);
@@ -490,8 +686,9 @@ static unsigned long ino_of(int fd)
     return TAWC_RAW(TAWC_SYS_fstat, fd, (long)&st, 0, 0, 0, 0) ? 0 : (unsigned long)st.st_ino;
 }
 
-/* Move a fresh mountinfo memfd above the floor and remember it. */
-static long watchable(long fd, int cloexec)
+/* Move a fresh memfd above the floor and remember it; epoll on it
+ * then watches <store><event>. */
+long tawcroot_mounts_watchable(long fd, int cloexec, const char *event)
 {
     if (!(tawcroot_namespace.session & TAWC_NS_EPOLL_TRAP)) {
         if (tawcroot_install_fd_floor_filter(__NR_epoll_ctl, 2)) return fd;
@@ -516,15 +713,16 @@ static long watchable(long fd, int cloexec)
         g_watch[slot].fd = (int)hi;
         g_watch[slot].ino = ino;
         g_watch[slot].sub = 0;
+        g_watch[slot].event = event;
     }
     return hi;
 }
 
-static void drain(void)
+void tawcroot_mounts_drain(const char *event)
 {
     char buf[256];
     for (int i = 0; i < 16; ++i)
-        if (g_watch[i].sub > 0)
+        if (g_watch[i].sub > 0 && g_watch[i].event == event)
             while (tawc_read(g_watch[i].sub, buf, sizeof buf) > 0) {}
 }
 
@@ -539,7 +737,7 @@ long tawcroot_mounts_epoll_ctl(const tawcroot_syscall_args *a, ucontext_t *uc)
     if (!g_watch[i].sub) {
         TAWCROOT_PATH_SCRATCH_AUTO(scratch);
         char *path = scratch->buf[0];
-        long e = store_path(path, "/mounts.event");
+        long e = store_path(path, g_watch[i].event);
         if (e < 0) return e;
         long in = TAWC_RAW(TAWC_SYS_inotify_init1, IN_NONBLOCK_FLAG | O_CLOEXEC, 0, 0, 0, 0, 0);
         if (in < 0) return in;
@@ -706,18 +904,18 @@ long tawcroot_mounts_proc_open(const char *path, int flags)
         if (!tawc_streq(p, "mountinfo") && !tawc_streq(p, "mounts")) return TAWC_ENOSYS;
     }
     tawcroot_mounts_sync();
-    drain();
+    tawcroot_mounts_drain(MOUNTS_EVENT);
     long fd = tawc_memfd_create("tawcroot-mounts", (flags & O_CLOEXEC) ? 1 : 0);
     if (fd < 0) return fd;
     long e = render((int)fd, tawc_streq(p, "mountinfo"));
     if (e) { tawc_close((int)fd); return e; }
     (void)tawc_lseek((int)fd, 0, SEEK_SET);
-    return g_tab ? watchable(fd, (flags & O_CLOEXEC) != 0) : fd;
+    return g_tab ? tawcroot_mounts_watchable(fd, (flags & O_CLOEXEC) != 0, MOUNTS_EVENT) : fd;
 }
 
 /* fstatfs, trapped in init sessions: the same container-facing fixups
- * as statfs (tmpfs magic for emulated mounts, read-only /proc/sys), for
- * callers that statfs an O_PATH fd (systemd). */
+ * as statfs (tmpfs magic for emulated mounts, read-only /proc/sys and
+ * /sys), for callers that statfs an O_PATH fd (systemd). */
 long tawcroot_mounts_fstatfs(const tawcroot_syscall_args *a, ucontext_t *uc)
 {
     (void)uc;
@@ -728,7 +926,8 @@ long tawcroot_mounts_fstatfs(const tawcroot_syscall_args *a, ucontext_t *uc)
     char *host = scratch->buf[0];
     long n = tawcroot_proc_fd_to_host_path((int)a->a, host, TAWCROOT_PATH_SCRATCH_SIZE);
     if (n < 0) return 0;
-    if (out[0] == 0x9fa0 && tawc_starts_with(host, "/proc/sys") && (!host[9] || host[9] == '/'))
+    if ((out[0] == 0x9fa0 && tawc_starts_with(host, "/proc/sys") && (!host[9] || host[9] == '/')) ||
+        out[0] == 0x62656572 /*SYSFS_MAGIC*/)
         out[10] |= 1; /* ST_RDONLY */
     for (size_t i = 0; g_tab && i < tawcroot_n_binds; ++i) {
         const struct tawcroot_bind *b = &tawcroot_binds[i];

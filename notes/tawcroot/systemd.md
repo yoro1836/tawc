@@ -27,8 +27,9 @@ subreaper. On top of that, in an init session:
 - Looks like a user-namespaced container: `uid_map`/`gid_map` read
   `0 <uid> 1`, `setgroups` reads `deny`, and `/proc/*/ns/user` stats
   with a non-init inode. systemd then skips units it can't run there
-  (debugfs, tracing, fusectl, hugepages, binfmt_misc). `/proc/sys`
-  `statfs` reports `ST_RDONLY`.
+  (debugfs, tracing, fusectl, hugepages, binfmt_misc). `/proc/sys` and
+  sysfs `statfs` report `ST_RDONLY` (with a writable `/sys`, systemd
+  resolves `/dev/console` to the host's kernel console).
 - Direct children of the init get `PR_SET_PDEATHSIG(SIGKILL)` (at fork
   and at exec, since systemd spawns through `posix_spawn`), so services
   die with the init instead of outliving it.
@@ -37,6 +38,9 @@ subreaper. On top of that, in an init session:
   `kill(-1)` no longer reaches app processes.
 - `unshare` returns `EPERM`, which systemd reads as "containerized" and
   skips service sandboxing.
+- systemd 262 also needs `pidfd_open` (it takes a pidfd on itself in
+  every spawned child), `faccessat2(fd, "", X_OK, AT_EMPTY_PATH)`, and
+  `statx` of the `/dev/shm` mount reporting `STATX_ATTR_MOUNT_ROOT`.
 
 ## Mounts
 Code: `src/mounts.c`. The session has one mount table, a flock-guarded
@@ -64,9 +68,15 @@ parent's view until its exec builds its own.
   mountinfo; those fds sit above the reserved fd floor, where a stacked
   filter traps `epoll_ctl` and registers an inotify fd on
   `<store>/mounts.event` instead, so systemd sees mount changes.
-- The new mount API (`fsopen`, `open_tree`, `move_mount`, ...,
-  `mount_setattr`) and `statmount`/`listmount` are `ENOSYS`; systemd
-  and util-linux fall back to `mount(2)`.
+- New mount API: `fsopen("tmpfs"|"ramfs")` returns an `O_PATH` fd on a
+  memfd holding the options (reads fail, so libmount's message drain
+  ends); `fsconfig` records `mode`/`source`/`ro`; `fsmount` creates the
+  backing dir and returns an `O_PATH` fd on it; `move_mount` of that fd
+  adds the entry. systemd 258+ mounts credentials this way and treats
+  `ENOSYS` as fatal. Other types, `open_tree`, `fspick`,
+  `mount_setattr` and `statmount`/`listmount` are `ENOSYS`, which sends
+  util-linux back to `mount(2)` (it probes `mount_setattr` before using
+  mount attributes like `nosuid`).
 
 Gaps: no mount namespaces (a service's private mounts are global);
 emulated mounts are invisible to processes outside the session.
@@ -106,7 +116,9 @@ BSS.
 ## Hostname, ports, peers
 - Hostname (`src/uts.c`): `sethostname`/`setdomainname` write
   `<store>/uts`, shared by the session; `uname` and
-  `/proc/sys/kernel/{hostname,domainname}` read it.
+  `/proc/sys/kernel/{hostname,domainname}` read it. journald epolls the
+  hostname fd; like mountinfo fds it registers an inotify watch on
+  `<store>/uts` instead, drained by `uname`.
 - Privileged ports (`src/ports.c`): guest port p < 1024 is host port
   p + 20000. Binds shift on any address; connect/sendto/sendmsg shift
   for loopback destinations; getsockname/getpeername/accept and
@@ -148,8 +160,8 @@ yet run on a device.
 
 ## Known boot failures
 
-Debian sid's systemd 257 boots to `graphical.target` with no failed
-units: journald, udevd, networkd, resolved, logind, dbus, hostnamed and
+Debian trixie's systemd 257 and sid's 262 boot to `graphical.target`
+(on the host, x86_64) with no failed units besides `getty@tty1`: journald, udevd, networkd, resolved, logind, dbus, hostnamed and
 console-getty run, `busctl`/`hostnamectl`/`resolvectl` work, and
 `tmp.mount`, `run-lock.mount`, `dev-mqueue.mount` mount.
 - `systemd-firstboot` waits on the console when `/etc/machine-id` is

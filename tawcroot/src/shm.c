@@ -550,6 +550,9 @@ int tawcroot_shm_seal_fcntl(int fd, int op, long arg, long *ret)
 /* ---------- stat / statx synthesis ---------- */
 
 
+/* Fixed inode number for the synthetic /dev/shm dir. */
+#define SHM_DIR_INO 0x7a5c0001u
+
 static void zero_stat(struct stat *out)
 {
 	uint8_t *p = (uint8_t *)out;
@@ -566,6 +569,7 @@ void tawcroot_shm_stat_dir(struct stat *out)
 {
 	zero_stat(out);
 	out->st_mode = S_IFDIR | 01777;  /* world-RWX with sticky, like /tmp */
+	out->st_ino = SHM_DIR_INO;
 	out->st_nlink = 2;
 	out->st_uid = 0;
 	out->st_gid = 0;
@@ -575,14 +579,20 @@ void tawcroot_shm_statx_dir(struct statx *out, unsigned int mask)
 {
 	zero_statx(out);
 	out->stx_mode = (uint16_t)(S_IFDIR | 01777);
+	out->stx_ino = SHM_DIR_INO;
 	out->stx_nlink = 2;
 	out->stx_uid = 0;
 	out->stx_gid = 0;
 	/* No STATX_SIZE: stx_size is 0 and a directory has no meaningful
 	 * size — advertising the bit while leaving the field 0 is a lie
 	 * the guest can observe. */
+	/* STATX_INO too: systemd 262 asks for it. */
 	out->stx_mask = STATX_TYPE | STATX_MODE | STATX_NLINK |
-			STATX_UID | STATX_GID;
+			STATX_UID | STATX_GID | STATX_INO;
+	/* A mount root, as a real /dev/shm tmpfs is; systemd 262 asks
+	 * this attribute whether it is mounted. */
+	out->stx_attributes_mask = STATX_ATTR_MOUNT_ROOT;
+	out->stx_attributes = STATX_ATTR_MOUNT_ROOT;
 	/* Mount id: the synthetic dir has no backing fd, but its
 	 * "contents" are memfds, and every memfd lives on the kernel's
 	 * one internal shm_mnt — so a throwaway probe memfd yields the

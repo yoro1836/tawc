@@ -15,6 +15,9 @@ long tawcroot_mounts_mount(const char *source, const char *target,
 			   const char *type, unsigned long flags,
 			   const char *data);
 long tawcroot_mounts_umount(const char *target, int flags);
+/* fsopen, fsconfig, fsmount, move_mount: tmpfs/ramfs in an init
+ * session, else ENOSYS. */
+long tawcroot_mounts_new_api(const tawcroot_syscall_args *a, ucontext_t *uc);
 
 /* /proc/<pid>/mountinfo|mounts and /proc/mounts: a synthesized fd, or
  * TAWC_ENOSYS. */
@@ -26,6 +29,12 @@ long tawcroot_mounts_magic(int fd);
 /* epoll_ctl on a synthesized mountinfo fd: registers a watch on the
  * session's mount-change events instead (lazy; fds >= the floor). */
 long tawcroot_mounts_epoll_ctl(const tawcroot_syscall_args *a, ucontext_t *uc);
+
+/* Make synthesized memfd `fd` pollable: epoll on it waits for writes to
+ * <store><event> (a static string). Returns the fd, maybe moved. */
+long tawcroot_mounts_watchable(long fd, int cloexec, const char *event);
+/* Clear pending wakeups for `event`. */
+void tawcroot_mounts_drain(const char *event);
 
 /* fstatfs in init sessions (lazy). */
 long tawcroot_mounts_fstatfs(const tawcroot_syscall_args *a, ucontext_t *uc);

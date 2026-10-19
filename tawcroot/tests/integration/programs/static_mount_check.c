@@ -1,7 +1,8 @@
 /* `tawcroot --init` mount emulation: tmpfs, bind, move and umount
  * through the session's mount table, seen by an older process, an
- * exec'd image and /proc/self/mountinfo; plus the container-style
- * uid_map and read-only /proc/sys.
+ * exec'd image and /proc/self/mountinfo; tmpfs through the new mount
+ * API (systemd credentials); plus the container-style uid_map and
+ * read-only /proc/sys and /sys.
  *
  * Exit 42 on success; every other code names the failed step. */
 
@@ -13,6 +14,7 @@
 #include <sys/epoll.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/statvfs.h>
 #include <sys/vfs.h>
 #include <sys/wait.h>
@@ -131,5 +133,35 @@ int main(int argc, char **argv)
 	    strncmp(buf, "         0 ", 11) != 0) return 50;
 	struct statvfs sv;
 	if (statvfs("/proc/sys", &sv) != 0 || !(sv.f_flag & ST_RDONLY)) return 51;
+	struct statfs sys;
+	if (statfs("/sys", &sys) == 0 && sys.f_type == 0x62656572 &&
+	    !(sys.f_flags & ST_RDONLY)) return 52;
+
+	/* fsopen/fsconfig/fsmount/move_mount, as systemd mounts credentials
+	 * (numbers are the same on every arch). */
+	int fs = (int)syscall(430 /*fsopen*/, "tmpfs", 1 /*FSOPEN_CLOEXEC*/);
+	if (fs < 0) return 70;
+	if (read(fs, buf, sizeof buf) != -1) return 71;   /* no messages */
+	if (syscall(431 /*fsconfig*/, fs, 1 /*SET_STRING*/, "mode", "0700", 0) != 0 ||
+	    syscall(431, fs, 6 /*CMD_CREATE*/, 0, 0, 0) != 0) return 72;
+	int mfd = (int)syscall(432 /*fsmount*/, fs, 1 /*FSMOUNT_CLOEXEC*/, 0);
+	if (mfd < 0) return 73;
+	char link[64];
+	snprintf(link, sizeof link, "/proc/self/fd/%d", mfd);
+	int dir = open(link, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (dir < 0) return 74;
+	int f = openat(dir, "cred", O_CREAT | O_WRONLY | O_CLOEXEC, 0600);
+	if (f < 0) return 75;
+	close(f);
+	if (syscall(431, fs, 0 /*SET_FLAG*/, "ro", 0, 0) != 0 ||
+	    syscall(431, fs, 7 /*CMD_RECONFIGURE*/, 0, 0, 0) != 0) return 76;
+	if (mkdir("/mnt/n", 0755) != 0 ||
+	    syscall(429 /*move_mount*/, mfd, "", AT_FDCWD, "/mnt/n", 4 /*F_EMPTY_PATH*/) != 0)
+		return 77;
+	if (!exists("/mnt/n/cred")) return 78;
+	if (stat("/mnt/n", &st) != 0 || (st.st_mode & 07777) != 0700) return 79;
+	if (slurp("/proc/self/mountinfo", buf, sizeof buf) < 0 ||
+	    !strstr(buf, " /mnt/n ro,relatime - tmpfs tmpfs ")) return 80;
+	if (syscall(430, "ext4", 1) != -1 || errno != ENOSYS) return 81;
 	return 42;
 }

@@ -668,7 +668,8 @@ test(prod_init_pid_isolation)
 	char pid[24];
 	snprintf(pid, sizeof pid, "%d", (int)host);
 	const char *args[] = {
-		"-r", FAKE_ROOTFS, "--init", "--", "/bin/static_init_check", pid, NULL
+		"-r", FAKE_ROOTFS, "-b", "/proc:proc", "--init", "--",
+		"/bin/static_init_check", pid, NULL
 	};
 	int rc = run_with(args);
 	int alive = waitpid(host, 0, WNOHANG) == 0;

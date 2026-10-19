@@ -403,18 +403,23 @@ void tawcroot_control_register(void)
 	/* Some Android 4.19 kernels backport pidfd_open but not P_PIDFD
 	 * waitid. GLib then selects pidfds and loses child exit status.
 	 * Probe an invalid fd: supported kernels return EBADF, incomplete
-	 * kernels EINVAL. Do not emulate waits using a racy fd-to-PID lookup.
+	 * kernels EINVAL. Not -1: kernels reject a negative id with EINVAL.
+	 * Do not emulate waits using a racy fd-to-PID lookup.
 	 * On incomplete kernels expose pidfd_open as unavailable so callers
 	 * use their ordinary SIGCHLD/waitpid path. New kernels stay native. */
-	if (TAWC_RAW(TAWC_SYS_waitid, 3 /* P_PIDFD */, -1, 0,
+	if (TAWC_RAW(TAWC_SYS_waitid, 3 /* P_PIDFD */, 0x7fffffff, 0,
 	             5 /* WEXITED | WNOHANG */, 0, 0) == TAWC_EINVAL)
 		tawcroot_dispatch_install(TAWC_SYS_pidfd_open, tawcroot_deny_enosys);
 	/* The new mount API and statmount/listmount would act on host
 	 * paths and mounts; ENOSYS sends callers (systemd, libmount) back
-	 * to mount(2) and /proc/self/mountinfo, which we emulate. */
-	static const int new_mount_api[] = { 428, 429, 430, 431, 432, 433, 442, 457, 458 };
+	 * to mount(2) and /proc/self/mountinfo, which we emulate. Init
+	 * sessions emulate fsopen..move_mount for tmpfs (credentials). */
+	static const int new_mount_api[] = { 428, 433, 442, 457, 458 };
 	for (size_t i = 0; i < sizeof new_mount_api / sizeof new_mount_api[0]; i++)
 		tawcroot_dispatch_install(new_mount_api[i], tawcroot_deny_enosys);
+	static const int emulated_mount_api[] = { 429, 430, 431, 432 };
+	for (size_t i = 0; i < sizeof emulated_mount_api / sizeof emulated_mount_api[0]; i++)
+		tawcroot_dispatch_install(emulated_mount_api[i], tawcroot_mounts_new_api);
 	tawcroot_dispatch_install(TAWC_SYS_seccomp,         handle_seccomp);
 	tawcroot_dispatch_install(TAWC_SYS_prctl,           handle_prctl);
 	tawcroot_dispatch_install(TAWC_SYS_rt_sigaction,    handle_rt_sigaction);
