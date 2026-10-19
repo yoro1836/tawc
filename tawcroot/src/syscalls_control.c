@@ -584,6 +584,13 @@ void tawcroot_control_register(void)
 	 * going forward, keeping the guest off the risky syscall entirely. */
 	tawcroot_dispatch_install(TAWC_SYS_clone3,          tawcroot_deny_enosys);
 
+	/* Kernel keyrings: Android SELinux denies apps KEYCTL_LINK but not
+	 * JOIN, which systemd treats as fatal (status=237/KEYRING). ENOSYS
+	 * makes systemd and other callers skip keyrings entirely. */
+	tawcroot_dispatch_install(TAWC_SYS_add_key,         tawcroot_deny_enosys);
+	tawcroot_dispatch_install(TAWC_SYS_request_key,     tawcroot_deny_enosys);
+	tawcroot_dispatch_install(TAWC_SYS_keyctl,          tawcroot_deny_enosys);
+
 	/* Never trap exit(2): musl unmaps a dying thread's stack before the
 	 * syscall. SIGSYS delivery then has no stack and kills the process. */
 

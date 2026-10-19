@@ -41,6 +41,9 @@ subreaper. On top of that, in an init session:
 - systemd 262 also needs `pidfd_open` (it takes a pidfd on itself in
   every spawned child), `faccessat2(fd, "", X_OK, AT_EMPTY_PATH)`, and
   `statx` of the `/dev/shm` mount reporting `STATX_ATTR_MOUNT_ROOT`.
+- Kernel keyrings (`add_key`, `request_key`, `keyctl`) return ENOSYS.
+  Android SELinux lets apps join a session keyring but not link the
+  user keyring, which systemd treats as fatal (`status=237/KEYRING`).
 
 ## Mounts
 Code: `src/mounts.c`. The session has one mount table, a flock-guarded
