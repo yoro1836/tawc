@@ -38,6 +38,7 @@
 #include "dispatch.h"
 #include "errno_neg.h"
 #include "identity.h"
+#include "namespace.h"
 #include "sysnr.h"
 #include "usercopy.h"
 
@@ -102,12 +103,14 @@ static void ident_writer_release(uint32_t s, const tawc_identity *next)
 	 * accepting a torn snapshot. Same reason Linux's
 	 * write_seqcount_begin needs smp_wmb(); pairs with the reader's
 	 * acquire fence. */
+	int moved = next->euid != g_ident.euid || next->egid != g_ident.egid;
 	__atomic_thread_fence(__ATOMIC_RELEASE);
 	const uint32_t *src = (const uint32_t *)next;
 	uint32_t       *dst = (uint32_t *)&g_ident;
 	for (size_t i = 0; i < IDENT_WORDS; i++)
 		__atomic_store_n(&dst[i], src[i], __ATOMIC_RELAXED);
 	__atomic_store_n(&g_ident_seq, s + 2, __ATOMIC_RELEASE);
+	if (moved) tawcroot_namespace_publish_ids(next->euid, next->egid);
 }
 
 void tawcroot_identity_load(const tawc_identity *in)

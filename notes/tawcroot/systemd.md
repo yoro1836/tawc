@@ -102,15 +102,35 @@ across exec. The loader therefore never maps text writable: like
 binfmt_elf it only zeroes a segment's file tail when the segment has
 BSS.
 
+## Hostname, ports, peers
+- Hostname (`src/uts.c`): `sethostname`/`setdomainname` write
+  `<store>/uts`, shared by the session; `uname` and
+  `/proc/sys/kernel/{hostname,domainname}` read it.
+- Privileged ports (`src/ports.c`): guest port p < 1024 is host port
+  p + 20000. Binds shift on any address; connect/sendto/sendmsg shift
+  for loopback destinations; getsockname/getpeername/accept and
+  recvfrom/recvmsg/recvmmsg sources shift back. Inet datagram sockets
+  are moved above the reserved fd floor, where a stacked filter traps
+  their receives. Not covered: `sendmmsg` destinations, and a real host
+  service on 20000–21023 shows up as its unshifted port.
+- Peer identity: SO_PEERCRED of a guest peer reports its virtual
+  uid/gid. Init-session processes record their ids in
+  `<store>/ids/<pid>` (checked against starttime) when they change;
+  a peer without a record has its nearest recorded ancestor's ids.
+  dbus-daemon needs this to let services own their bus names.
+- `capget` answers libcap-ng's version probe like the kernel (writes
+  the v3 version, `EINVAL`).
+
 ## Known boot failures
 
-Debian sid's systemd 257 reaches `multi-user.target` (journald, udevd,
-networkd, logind, dbus, getty run; `tmp.mount`, `run-lock.mount`,
-`dev-mqueue.mount` mount).
+Debian sid's systemd 257 boots to `graphical.target` with no failed
+units: journald, udevd, networkd, resolved, logind, dbus, hostnamed and
+console-getty run, `busctl`/`hostnamectl`/`resolvectl` work, and
+`tmp.mount`, `run-lock.mount`, `dev-mqueue.mount` mount.
 - `systemd-firstboot` waits on the console when `/etc/machine-id` is
   unset; the rootfs needs its first-boot settings done or the unit masked.
 - `/run/initctl` and `/run/systemd/journal/dev-log` symlinks into a
   host-bound `/dev` fail `EACCES` (harmless); `getty@tty1` can't open
   the host's `/dev/tty1`.
-- `systemd-resolved` fails (not yet investigated); `sethostname` is
-  `EPERM`.
+- Raising `RLIMIT_NOFILE` above the app's hard limit fails `EPERM`
+  (services log it and continue).

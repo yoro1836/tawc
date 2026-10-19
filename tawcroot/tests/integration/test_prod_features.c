@@ -136,6 +136,8 @@ static bool build_rootfs(void)
 		  "static_cgroup_check" },
 		{ TAWCROOT_STATIC_MOUNT_CHECK_BIN,
 		  "static_mount_check" },
+		{ TAWCROOT_STATIC_NET_CHECK_BIN,
+		  "static_net_check" },
 	};
 	for (size_t i = 0; i < sizeof fixtures / sizeof fixtures[0]; i++) {
 		snprintf(p, sizeof p, "%s/bin/%s",
@@ -682,6 +684,18 @@ test(prod_init_mounts)
 	const char *args[] = {
 		"-r", FAKE_ROOTFS, "-b", "/proc:/proc", "--init", "--",
 		"/bin/static_mount_check", NULL
+	};
+	test_int_eq(run_with(args), 42);
+	rh_rmrf(FAKE_ROOTFS);
+}
+
+test(prod_init_net)
+{
+	rh_rmrf(FAKE_ROOTFS);
+	test_true(build_rootfs());
+	const char *args[] = {
+		"-r", FAKE_ROOTFS, "-b", "/proc:/proc", "--init", "--",
+		"/bin/static_net_check", NULL
 	};
 	test_int_eq(run_with(args), 42);
 	rh_rmrf(FAKE_ROOTFS);

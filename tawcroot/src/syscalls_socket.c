@@ -73,6 +73,8 @@
 #include "tawc_uapi.h"
 #include "usercopy.h"
 #include "proc_tcp.h"
+#include "ports.h"
+#include "namespace.h"
 
 #define AF_UNIX_FAMILY  1
 #define AF_NETLINK_FAMILY  16
@@ -600,13 +602,17 @@ static long handle_bind(const tawcroot_syscall_args *args, ucontext_t *uc)
 		    fam == AF_NETLINK_FAMILY && fd_is_uevent_stub((int)args->a))
 			return 0;
 	}
+	long pr = tawcroot_ports_call(args);
+	if (pr != TAWC_ENOSYS) return pr;
 	return do_translate_unix_addr(TAWC_SYS_bind, args);
 }
 
 static long handle_connect(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
-	long result = do_translate_unix_addr(TAWC_SYS_connect, args);
+	long result = tawcroot_ports_call(args);
+	if (result == TAWC_ENOSYS)
+		result = do_translate_unix_addr(TAWC_SYS_connect, args);
 	if (!result || result == -115) tawcroot_tcp_record((int)args->a);
 	return result;
 }
@@ -630,6 +636,8 @@ static long handle_sendto(const tawcroot_syscall_args *args, ucontext_t *uc)
 	(void)uc;
 	const void *dest = (const void *)(uintptr_t)args->e;
 	long addrlen = (long)args->f;
+	long pr = tawcroot_ports_call(args);
+	if (pr != TAWC_ENOSYS) return pr;
 	if (!dest || addrlen <= 0) {
 		return TAWC_RAW(TAWC_SYS_sendto, args->a, args->b, args->c,
 				args->d, args->e, args->f);
@@ -677,6 +685,8 @@ static long handle_sendmsg(const tawcroot_syscall_args *args, ucontext_t *uc)
 		return TAWC_RAW(TAWC_SYS_sendmsg, args->a, args->b, args->c,
 				0, 0, 0);
 	}
+	long pr = tawcroot_ports_call(args);
+	if (pr != TAWC_ENOSYS) return pr;
 	struct tawc_msghdr mh;
 	long e = tawc_copy_from_guest(&mh, sizeof mh, gmsg);
 	if (e < 0) return TAWC_EFAULT;
@@ -760,6 +770,8 @@ static long getname_with_reverse(int nr, long a, long guest_addr_l,
 	} else {
 		reverse_translate_unix_sockaddr(&kbuf.un, &kern_len);
 	}
+	(void)tawcroot_ports_rewrite(&kbuf, kern_len,
+		nr == TAWC_SYS_getsockname ? TAWC_PORTS_LOCAL : TAWC_PORTS_PEER);
 
 	/* Copy back up to the guest's buffer cap (kernel truncates); write
 	 * the FULL translated length to *addrlen regardless (kernel
@@ -886,7 +898,12 @@ static long handle_getsockopt(const tawcroot_syscall_args *args, ucontext_t *uc)
 	if (rv < 0) return rv;
 
 	uint32_t real_uid = (uint32_t)tawc_getuid();
-	if (klen >= 8 && cred.uid == real_uid && tawcroot_identity_euid() == 0) {
+	uint32_t uid, gid;
+	if (klen >= sizeof cred && cred.uid == real_uid &&
+	    tawcroot_namespace_peer_ids(cred.pid, &uid, &gid)) {
+		cred.uid = uid;
+		cred.gid = gid;
+	} else if (klen >= 8 && cred.uid == real_uid && tawcroot_identity_euid() == 0) {
 		cred.uid = 0;
 		if (klen >= sizeof cred) cred.gid = 0;
 	}
@@ -927,7 +944,7 @@ static long handle_socket(const tawcroot_syscall_args *args, ucontext_t *uc)
 			if (stub >= 0) return stub;
 		}
 	}
-	return rv;
+	return tawcroot_ports_socket(rv, args->a, args->b);
 }
 
 void tawcroot_socket_register(void)

@@ -36,6 +36,7 @@
 
 #include "cgroup.h"
 #include "mounts.h"
+#include "uts.h"
 #include "dispatch.h"
 #include "errno_neg.h"
 #include "gamepad.h"
@@ -281,6 +282,8 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 		long pf = tawcroot_namespace_proc_open(path, flags);
 		if (pf != TAWC_ENOSYS) return pf;
 		pf = tawcroot_mounts_proc_open(path, flags);
+		if (pf != TAWC_ENOSYS) return pf;
+		pf = tawcroot_uts_proc_open(path, flags);
 		if (pf != TAWC_ENOSYS) return pf;
 	}
 	if (cgroup_on()) {
