@@ -43,6 +43,7 @@
 #define TAWC_ERANGE        (-34)
 #define TAWC_ENAMETOOLONG  (-36)
 #define TAWC_ENOSYS        (-38)
+#define TAWC_ENOTEMPTY     (-39)
 #define TAWC_ELOOP         (-40)
 #define TAWC_ENODATA       (-61)
 #define TAWC_EOPNOTSUPP    (-95)

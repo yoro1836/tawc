@@ -34,6 +34,7 @@
 
 #include <sys/stat.h>
 
+#include "cgroup.h"
 #include "dispatch.h"
 #include "errno_neg.h"
 #include "gamepad.h"
@@ -158,6 +159,19 @@ static long translate_local(struct tawcroot_path_scratch *scratch, int slot,
 			    struct fs_path *out);
 static void decorate_stat(struct stat *st);
 
+static inline int cgroup_on(void)
+{
+	return (tawcroot_namespace.session & TAWC_NS_CGROUP) != 0;
+}
+
+/* Cheap pre-check before tawcroot_cgroup_locate: a "cgroup.*" leaf. */
+static int is_cgroup_leaf(const char *p)
+{
+	const char *leaf = p;
+	for (const char *q = p; *q; ++q) if (*q == '/') leaf = q + 1;
+	return tawc_starts_with(leaf, "cgroup.");
+}
+
 /* Pick the resolution mode for an openat based on the kernel flags.
  * O_NOFOLLOW + O_PATH means "don't follow the leaf even if it's a
  * symlink". Kernel O_CREAT semantics split on O_EXCL:
@@ -262,6 +276,14 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	if (gamepad != TAWC_ENOSYS) return gamepad;
 	long nsfd = tawcroot_namespace_open(path, flags);
 	if (nsfd != TAWC_ENOSYS) return nsfd;
+	if (tawcroot_namespace.init_pid) {
+		long pf = tawcroot_namespace_proc_open(path, flags);
+		if (pf != TAWC_ENOSYS) return pf;
+	}
+	if (cgroup_on()) {
+		long cg = tawcroot_cgroup_proc_open(path, flags);
+		if (cg != TAWC_ENOSYS) return cg;
+	}
 
 	/* /proc/self/maps and /proc/<our-pid>/maps: synthesize a shadow fd
 	 * backed by a memfd containing the kernel's maps output with each
@@ -368,6 +390,15 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	 * this works on every kernel we target (AT_EMPTY_PATH on openat
 	 * only landed in 6.6, kernel 5.4 device doesn't have it). */
 	const char *p = t.is_root ? "." : t.path;
+
+	/* Fake cgroupfs interface files (cgroup.h). */
+	if (cgroup_on() && is_cgroup_leaf(p)) {
+		char *rel = scratch->buf[2];
+		if (tawcroot_cgroup_locate(t.fd, p, rel, TAWCROOT_PATH_SCRATCH_SIZE)) {
+			long cg = tawcroot_cgroup_open(t.fd, p, flags, rel);
+			if (cg != TAWC_ENOSYS) return cg;
+		}
+	}
 
 	/* O_TMPFILE (plan stage 4). With O_EXCL ("will never be linked"):
 	 * pure passthrough — anonymous file creation is allowed (only
@@ -1254,8 +1285,26 @@ static long handle_##name(const tawcroot_syscall_args *args,             \
 			(narg) > 5 ? args->f : 0);                        \
 }
 
-DECLARE_AT_PASS(mkdirat,    TAWC_SYS_mkdirat,    3, TAWCROOT_PATH_PARENT_CREATE,
-		TAWCROOT_PATH_INTENT_WRITE)
+/* mkdirat: translate and pass through; a new fake-cgroupfs directory
+ * also gets its interface files (cgroup.h). */
+static long handle_mkdirat(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	const char *gpath = (const char *)(uintptr_t)args->b;
+	if (!gpath) return TAWC_EFAULT;
+	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+	struct fs_path t;
+	long e = translate_at(scratch, 0, (int)args->a, gpath,
+			      TAWCROOT_PATH_PARENT_CREATE,
+			      TAWCROOT_PATH_INTENT_WRITE, &t);
+	if (e) return e;
+	const char *p = t.is_root ? "." : t.path;
+	long rv = TAWC_RAW(TAWC_SYS_mkdirat, t.fd, (long)p, args->c, 0, 0, 0);
+	if (!rv && cgroup_on() &&
+	    tawcroot_cgroup_locate(t.fd, p, scratch->buf[2], TAWCROOT_PATH_SCRATCH_SIZE))
+		tawcroot_cgroup_mkdir(t.fd, p, scratch->buf[2]);
+	return rv;
+}
 
 /* mknodat: translate and attempt the host call. FIFOs, sockets and
  * regular files succeed as the app uid; S_IFCHR/S_IFBLK needs
@@ -1430,6 +1479,14 @@ static long handle_unlinkat(const tawcroot_syscall_args *args, ucontext_t *uc)
 					     sizeof tok) == 1 &&
 		    tawcroot_linkstore_state() == TAWCROOT_STORE_READY) {
 			long rv = tawcroot_link_del(tok, t.fd, t.path);
+			tawcroot_pathcache_mutated(t.fd, t.path);
+			return rv;
+		}
+	}
+	if ((flag & AT_REMOVEDIR) && cgroup_on()) {
+		char *rel = scratch->buf[2];
+		if (tawcroot_cgroup_locate(t.fd, t.path, rel, TAWCROOT_PATH_SCRATCH_SIZE)) {
+			long rv = tawcroot_cgroup_rmdir(t.fd, t.path, rel);
 			tawcroot_pathcache_mutated(t.fd, t.path);
 			return rv;
 		}
@@ -2007,6 +2064,9 @@ static long handle_inotify_add_watch(const tawcroot_syscall_args *args,
 	long bp = tawc_proc_fd_path(host_path, TAWCROOT_PATH_SCRATCH_SIZE,
 				    t.fd, t.path);
 	if (bp < 0) return bp;
+	/* Empty suffix: the watch target is t.fd itself, reached only by
+	 * following the /proc magic link. */
+	if (!t.path || !*t.path) mask &= ~0x02000000U;
 	return TAWC_RAW(TAWC_SYS_inotify_add_watch, inotify_fd,
 			(long)host_path, mask, 0, 0, 0);
 }
@@ -2846,6 +2906,9 @@ static long handle_statfs(const tawcroot_syscall_args *args, ucontext_t *uc)
 			   0, 0, 0, 0);
 	if (rv != 0) return rv;
 	if (t.ro) local.f_flags |= TAWC_ST_RDONLY;
+	if (cgroup_on() &&
+	    tawcroot_cgroup_locate(t.fd, t.path, scratch->buf[3], TAWCROOT_PATH_SCRATCH_SIZE))
+		local.f_type = TAWCROOT_CGROUP2_SUPER_MAGIC;
 	long ce = tawc_copy_to_guest(out, &local, sizeof local);
 	return ce < 0 ? ce : 0;
 }

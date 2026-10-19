@@ -62,6 +62,7 @@ reparent to it and their `getppid()` maps to 1. `kill`/`tgkill` aimed
 at init drop signals missing from its `/proc/<pid>/status` SigCgt,
 SIGKILL included, like a namespace init; a SIGKILL from outside the
 guest still lands. Covered by `prod_init_session`.
+What else an init session emulates for systemd is in [systemd.md](systemd.md).
 
 Two filters are active: Android's existing `untrusted_app` filter
 (already loaded by zygote before we got control), plus our filter

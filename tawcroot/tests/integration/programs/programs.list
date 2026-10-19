@@ -43,6 +43,7 @@ static_link_publish_argv12
 static_mknod_chr_fake
 static_namespace_check
 static_init_check
+static_cgroup_check
 dynamic_exit42
 dynamic_argv_check
 dynamic_big_stack

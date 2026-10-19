@@ -132,6 +132,8 @@ static bool build_rootfs(void)
 		  "static_namespace_check" },
 		{ TAWCROOT_STATIC_INIT_CHECK_BIN,
 		  "static_init_check" },
+		{ TAWCROOT_STATIC_CGROUP_CHECK_BIN,
+		  "static_cgroup_check" },
 	};
 	for (size_t i = 0; i < sizeof fixtures / sizeof fixtures[0]; i++) {
 		snprintf(p, sizeof p, "%s/bin/%s",
@@ -643,6 +645,18 @@ test(prod_init_session)
 	test_true(build_rootfs());
 	const char *args[] = {
 		"-r", FAKE_ROOTFS, "--init", "--", "/bin/static_init_check", NULL
+	};
+	test_int_eq(run_with(args), 42);
+	rh_rmrf(FAKE_ROOTFS);
+}
+
+test(prod_cgroup_session)
+{
+	rh_rmrf(FAKE_ROOTFS);
+	test_true(build_rootfs());
+	const char *args[] = {
+		"-r", FAKE_ROOTFS, "--init", "--cgroup", "--",
+		"/bin/static_cgroup_check", NULL
 	};
 	test_int_eq(run_with(args), 42);
 	rh_rmrf(FAKE_ROOTFS);

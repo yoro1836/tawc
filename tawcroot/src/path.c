@@ -33,6 +33,7 @@
 #include "fdtab.h"
 #include "io.h"
 #include "linkstore.h"
+#include "namespace.h"
 #include "path.h"
 #include "path_oracle.h"
 #include "fdpath.h"
@@ -45,6 +46,7 @@
 #include "raw_sys.h"
 #include "rescue.h"
 #include "sysnr.h"
+#include "tawc_string.h"
 #include "tawc_uapi.h"
 #include "usercopy.h"
 
@@ -749,6 +751,22 @@ static int magic_link_traversed(tawcroot_path_mode mode, const char *suffix,
 	return suffix[ml] != 0 || mode == TAWCROOT_PATH_FOLLOW;
 }
 
+/* /proc/1/... names the fake init (namespace.h), not Android's init.
+ * Rewrites a /proc-relative suffix in place; leaves it alone if the
+ * result would not fit. */
+static void proc_one_to_init(char *suffix, size_t cap)
+{
+	int init = tawcroot_namespace.init_pid;
+	if (!init || suffix[0] != '1' || (suffix[1] && suffix[1] != '/')) return;
+	char num[16];
+	size_t n = 0;
+	if (tawc_str_append_dec(num, sizeof num, &n, init)) return;
+	size_t len = tawc_strlen(suffix);
+	if (len - 1 + n >= cap) return;
+	memmove(suffix + n, suffix + 1, len);
+	memcpy(suffix, num, n);
+}
+
 /* Stage 2, containment: a /proc magic link is resolved by the KERNEL,
  * which knows nothing about the guest's view. The bind lookup takes the
  * early return in tawcroot_path_translate_with_ctx ("Bind first … skip
@@ -904,6 +922,7 @@ static tawcroot_path_result path_translate(const char *guest_path,
 		if (r.err) break;
 		proc_bind = fd_is_proc_bind(r.base_fd);
 		if (!proc_bind) break;
+		proc_one_to_init(out_suffix, out_cap);
 		int kind;
 		size_t ml = tawcroot_proc_magic_link_classify(out_suffix, &kind);
 		int directory_fd = kind == TAWCROOT_PROC_MAGIC_FD_OWN && out_suffix[ml] == '/';
