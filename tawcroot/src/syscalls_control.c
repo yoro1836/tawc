@@ -39,6 +39,7 @@
 #include "sysnr.h"
 #include "usercopy.h"
 #include "tawc_string.h"
+#include "linkstore.h"
 #include <signal.h>
 
 #ifndef PR_GET_SECCOMP
@@ -171,13 +172,15 @@ static long handle_get_robust_list(const tawcroot_syscall_args *args, ucontext_t
 
 /* Init sessions: a guest SIGSEGV/SIGBUS handler is fronted by one that
  * first writes the fault (address, pc, and the /proc/self/maps lines
- * of pc and the return address) to stderr, which is the --console log.
+ * of pc and the return address) to stderr and to <store>/fault.log,
+ * which survives a console helper killed along with the session.
  * It then restores the guest's action and returns, so the fault
  * re-raises into the guest's handler. systemd's crash handler alone
  * only says "Caught <SEGV>". */
 static uint64_t g_fault_action[2][TAWC_KERN_SIGACTION_SIZE / sizeof(uint64_t)];
 static int g_fault_wrapped[2];
 static char g_maps[65536];
+static char g_fault_path[4200];
 
 static int fault_slot(int sig) { return sig == SIGSEGV ? 0 : sig == SIGBUS ? 1 : -1; }
 
@@ -204,7 +207,13 @@ static unsigned long parse_hex(const char **p)
 	}
 }
 
-static void write_map_line(long len, unsigned long addr)
+static void fault_emit(long lf, const char *p, long n)
+{
+	(void)TAWC_RAW(TAWC_SYS_write, 2, (long)p, n, 0, 0, 0);
+	if (lf >= 0) (void)TAWC_RAW(TAWC_SYS_write, lf, (long)p, n, 0, 0, 0);
+}
+
+static void write_map_line(long lf, long len, unsigned long addr)
 {
 	for (long i = 0; i < len;) {
 		long end = i;
@@ -213,7 +222,7 @@ static void write_map_line(long len, unsigned long addr)
 		unsigned long lo = parse_hex(&p);
 		unsigned long hi = (*p == '-') ? (++p, parse_hex(&p)) : 0;
 		if (addr >= lo && addr < hi) {
-			(void)TAWC_RAW(TAWC_SYS_write, 2, (long)&g_maps[i], end - i + (end < len), 0, 0, 0);
+			fault_emit(lf, &g_maps[i], end - i + (end < len));
 			return;
 		}
 		i = end + 1;
@@ -248,7 +257,13 @@ static void fault_log(int sig, siginfo_t *info, void *ucv)
 	(void)tawc_str_append(line, sizeof line, &n, " sp ");
 	put_hex(line, sizeof line, &n, sp);
 	(void)tawc_str_append(line, sizeof line, &n, "\n");
-	(void)TAWC_RAW(TAWC_SYS_write, 2, (long)line, (long)n, 0, 0, 0);
+	size_t k = 0;
+	long lf = -1;
+	if (tawcroot_store_host_path_len &&
+	    !tawc_str_append(g_fault_path, sizeof g_fault_path, &k, tawcroot_store_host_path) &&
+	    !tawc_str_append(g_fault_path, sizeof g_fault_path, &k, "/fault.log"))
+		lf = tawc_openat(AT_FDCWD, g_fault_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+	fault_emit(lf, line, (long)n);
 	long fd = tawc_openat(AT_FDCWD, "/proc/self/maps", O_RDONLY | O_CLOEXEC, 0);
 	if (fd >= 0) {
 		long len = 0, r;
@@ -256,9 +271,10 @@ static void fault_log(int sig, siginfo_t *info, void *ucv)
 		       (r = tawc_read((int)fd, g_maps + len, sizeof g_maps - (size_t)len)) > 0)
 			len += r;
 		tawc_close((int)fd);
-		write_map_line(len, pc);
-		write_map_line(len, ra);
+		write_map_line(lf, len, pc);
+		write_map_line(lf, len, ra);
 	}
+	if (lf >= 0) tawc_close((int)lf);
 	if (slot >= 0) {
 		g_fault_wrapped[slot] = 0;
 		(void)TAWC_RAW(TAWC_SYS_rt_sigaction, sig, (long)g_fault_action[slot], 0, 8, 0, 0);
