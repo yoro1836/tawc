@@ -2,6 +2,7 @@ package me.phie.tawc.install
 
 import android.content.Context
 import android.system.Os
+import android.util.Log
 import me.phie.tawc.AppPaths
 import me.phie.tawc.GraphicsBackend
 import me.phie.tawc.Settings
@@ -472,10 +473,19 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      * so shells share its mounts, cgroups and hostname and `systemctl`
      * reaches pid 1. The init lives until [stopSystemd] or app death
      * (tawcroot's PDEATHSIG) and holds a session meanwhile. Its console
-     * is `<install>/tawcroot/console.log`. Returns whether a session is
-     * running to join. See notes/tawcroot/systemd.md.
+     * (and tawcroot's own errors) go to guest `/var/log/tawc-console.log`
+     * so a failed boot is readable from a plain shell. Returns whether a
+     * session is running to join. See notes/tawcroot/systemd.md.
      */
-    fun ensureSystemd(rootfs: String): Boolean {
+    fun ensureSystemd(rootfs: String): Boolean = try {
+        bootSystemd(rootfs)
+    } catch (t: Throwable) {
+        // A failed boot must not take the spawn (or the app) down with it.
+        Log.w(TAG, "systemd boot failed", t)
+        false
+    }
+
+    private fun bootSystemd(rootfs: String): Boolean {
         val id = store.idForRootfs(rootfs) ?: return false
         if (store.load(id)?.systemdBoot != true) return false
         synchronized(inits) {
@@ -484,6 +494,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
                 ?: return false
             val stateDir = File(store.installationDir(id), "tawcroot").apply { mkdirs() }
             val record = File(stateDir, "init").apply { delete() }
+            val console = File(rootfs, "var/log/tawc-console.log").apply { parentFile?.mkdirs() }
             val assetBinds = assetBinds()
             val externalBinds = externalBindsFor(rootfs)
             val tmpdir = prepareSpawn(rootfs, assetBinds, externalBinds)
@@ -496,14 +507,14 @@ class TawcrootMethod(context: Context) : InstallationMethod {
                 for (spec in bindSpecs(assetBinds, externalBinds, store.andoHostDir(rootfs))) {
                     if (spec.dst != "/tmp/.X11-unix") addAll(listOf("-b", spec.arg()))
                 }
-                addAll(listOf("-b", "${File(stateDir, "console.log")}:/dev/console"))
+                addAll(listOf("-b", "$console:/dev/console"))
                 addAll(listOf("--init", "--cgroup", "--", "/usr/bin/env", "-i", "container=tawc", initBin))
             }
-            File(stateDir, "console.log").writeText("")
+            console.writeText("")
             val proc = ProcessBuilder(argv)
                 .directory(File(tmpdir))
                 .redirectErrorStream(true)
-                .redirectOutput(ProcessBuilder.Redirect.appendTo(File(stateDir, "console.log")))
+                .redirectOutput(ProcessBuilder.Redirect.appendTo(console))
                 .also {
                     it.environment().clear()
                     it.environment()["TMPDIR"] = tmpdir
@@ -522,6 +533,8 @@ class TawcrootMethod(context: Context) : InstallationMethod {
             // tawcroot publishes the session before exec'ing systemd.
             val deadline = System.nanoTime() + INIT_PUBLISH_TIMEOUT_NANOS
             while (!record.exists() && proc.isAlive && System.nanoTime() < deadline) Thread.sleep(20)
+            // An init that dies during startup would leave joiners to exit 97.
+            if (record.exists()) proc.waitFor(INIT_SETTLE_MILLIS, TimeUnit.MILLISECONDS)
             return record.exists() && proc.isAlive
         }
     }
@@ -565,6 +578,8 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         private val inits = HashMap<String, Process>()
         private val SYSTEMD_PATHS = listOf("/usr/lib/systemd/systemd", "/lib/systemd/systemd")
         private const val INIT_PUBLISH_TIMEOUT_NANOS = 2_000_000_000L
+        private const val INIT_SETTLE_MILLIS = 300L
+        private const val TAG = "tawc"
         private const val SYSTEMD_STOP_TIMEOUT_SECONDS = 10L
         private const val SIGRTMIN_PLUS_4 = 38
         /** In-rootfs path the share dir is exposed at. Single source

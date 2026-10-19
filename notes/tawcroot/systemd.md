@@ -138,8 +138,8 @@ App: the per-distro "Boot with systemd" setting (tawcroot installs,
 `/usr/lib/systemd/systemd` on the first spawn and `--join`s every spawn
 while it runs. The init gets the normal binds minus `/tmp/.X11-unix`
 (boot-time tmpfiles empties that dir, Xwayland's socket included) and
-`<install>/tawcroot/console.log` as `/dev/console`, so `console-getty`
-fails there. Turning the setting off sends SIGRTMIN+4 (poweroff). Not
+guest `/var/log/tawc-console.log` as `/dev/console` (tawcroot's own
+errors land there too), so `console-getty` fails there. Turning the setting off sends SIGRTMIN+4 (poweroff). Not
 yet run on a device.
 
 ## Known boot failures
