@@ -16,7 +16,9 @@ binutils. On Ubuntu 24.04 install `gcc-14`, then run
 runs that on ubuntu-24.04 and builds both Android ABIs with the pinned NDK,
 uploading `libtawcroot.so` per ABI. `.github/workflows/apk.yml` builds the
 debug APK (arm64-v8a, F-Droid recipe configuration) in Debian trixie with
-the package set below and uploads it as an artifact.
+the package set below and uploads it as an artifact, signed with the
+committed debug key `.github/debug.keystore` (password `android`) so
+artifacts update in place.
 Host runtime binaries use GNU ld's
 `-Ttext-segment` and GCC's trap-only UBSan option. Android production builds
 continue to use the NDK toolchain; ARLinux also builds that standalone runtime

@@ -75,6 +75,8 @@ jobs:
           command -v cargo-ndk >/dev/null || cargo install cargo-ndk --version 4.1.2 --locked
       - name: Build APK
         run: |
+          # Fixed debug key, so each artifact installs over the last.
+          mkdir -p ~/.android && cp .github/debug.keystore ~/.android/debug.keystore
           printf 'tawcMethods=tawcroot\n' >> gradle.properties
           scripts/build-app.sh --abi=arm64-v8a --graphics=libhybris,cpu
       - uses: actions/upload-artifact@v4
