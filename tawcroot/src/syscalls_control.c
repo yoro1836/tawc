@@ -38,6 +38,8 @@
 #include "syscalls_control.h"
 #include "sysnr.h"
 #include "usercopy.h"
+#include "tawc_string.h"
+#include <signal.h>
 
 #ifndef PR_GET_SECCOMP
 # define PR_GET_SECCOMP 21
@@ -167,6 +169,127 @@ static long handle_get_robust_list(const tawcroot_syscall_args *args, ucontext_t
 	return 0;
 }
 
+/* Init sessions: a guest SIGSEGV/SIGBUS handler is fronted by one that
+ * first writes the fault (address, pc, and the /proc/self/maps lines
+ * of pc and the return address) to stderr, which is the --console log.
+ * It then restores the guest's action and returns, so the fault
+ * re-raises into the guest's handler. systemd's crash handler alone
+ * only says "Caught <SEGV>". */
+static uint64_t g_fault_action[2][TAWC_KERN_SIGACTION_SIZE / sizeof(uint64_t)];
+static int g_fault_wrapped[2];
+static char g_maps[65536];
+
+static int fault_slot(int sig) { return sig == SIGSEGV ? 0 : sig == SIGBUS ? 1 : -1; }
+
+static void put_hex(char *buf, size_t cap, size_t *n, unsigned long v)
+{
+	char tmp[19] = "0x";
+	int len = 2;
+	for (int shift = 60; shift >= 0; shift -= 4) {
+		int d = (int)((v >> shift) & 15);
+		if (d || len > 2 || !shift) tmp[len++] = "0123456789abcdef"[d];
+	}
+	tmp[len] = 0;
+	(void)tawc_str_append(buf, cap, n, tmp);
+}
+
+static unsigned long parse_hex(const char **p)
+{
+	unsigned long v = 0;
+	for (;; ++*p) {
+		char c = **p;
+		if (c >= '0' && c <= '9') v = v * 16 + (unsigned long)(c - '0');
+		else if (c >= 'a' && c <= 'f') v = v * 16 + (unsigned long)(c - 'a' + 10);
+		else return v;
+	}
+}
+
+static void write_map_line(long len, unsigned long addr)
+{
+	for (long i = 0; i < len;) {
+		long end = i;
+		while (end < len && g_maps[end] != '\n') ++end;
+		const char *p = &g_maps[i];
+		unsigned long lo = parse_hex(&p);
+		unsigned long hi = (*p == '-') ? (++p, parse_hex(&p)) : 0;
+		if (addr >= lo && addr < hi) {
+			(void)TAWC_RAW(TAWC_SYS_write, 2, (long)&g_maps[i], end - i + (end < len), 0, 0, 0);
+			return;
+		}
+		i = end + 1;
+	}
+}
+
+static void fault_log(int sig, siginfo_t *info, void *ucv)
+{
+	ucontext_t *uc = ucv;
+	int slot = fault_slot(sig);
+#if defined(__aarch64__)
+	unsigned long pc = uc->uc_mcontext.pc, ra = uc->uc_mcontext.regs[30];
+	unsigned long sp = uc->uc_mcontext.sp;
+#else
+	unsigned long pc = (unsigned long)uc->uc_mcontext.gregs[REG_RIP];
+	unsigned long sp = (unsigned long)uc->uc_mcontext.gregs[REG_RSP];
+	unsigned long ra = sp ? *(unsigned long *)sp : 0;   /* best effort */
+#endif
+	char line[160];
+	size_t n = 0;
+	(void)tawc_str_append(line, sizeof line, &n, "tawcroot: pid ");
+	(void)tawc_str_append_dec(line, sizeof line, &n, tawc_getpid());
+	(void)tawc_str_append(line, sizeof line, &n, sig == SIGSEGV ? " SIGSEGV" : " SIGBUS");
+	(void)tawc_str_append(line, sizeof line, &n, " code ");
+	(void)tawc_str_append_dec(line, sizeof line, &n, info->si_code);
+	(void)tawc_str_append(line, sizeof line, &n, " addr ");
+	put_hex(line, sizeof line, &n, (unsigned long)info->si_addr);
+	(void)tawc_str_append(line, sizeof line, &n, " pc ");
+	put_hex(line, sizeof line, &n, pc);
+	(void)tawc_str_append(line, sizeof line, &n, " ra ");
+	put_hex(line, sizeof line, &n, ra);
+	(void)tawc_str_append(line, sizeof line, &n, " sp ");
+	put_hex(line, sizeof line, &n, sp);
+	(void)tawc_str_append(line, sizeof line, &n, "\n");
+	(void)TAWC_RAW(TAWC_SYS_write, 2, (long)line, (long)n, 0, 0, 0);
+	long fd = tawc_openat(AT_FDCWD, "/proc/self/maps", O_RDONLY | O_CLOEXEC, 0);
+	if (fd >= 0) {
+		long len = 0, r;
+		while (len < (long)sizeof g_maps &&
+		       (r = tawc_read((int)fd, g_maps + len, sizeof g_maps - (size_t)len)) > 0)
+			len += r;
+		tawc_close((int)fd);
+		write_map_line(len, pc);
+		write_map_line(len, ra);
+	}
+	if (slot >= 0) {
+		g_fault_wrapped[slot] = 0;
+		(void)TAWC_RAW(TAWC_SYS_rt_sigaction, sig, (long)g_fault_action[slot], 0, 8, 0, 0);
+	}
+}
+
+/* rt_sigaction for SIGSEGV/SIGBUS in an init session; see fault_log. */
+static long fault_sigaction(int slot, const uint64_t *act, void *oldact)
+{
+	if (oldact) {
+		uint64_t cur[TAWC_KERN_SIGACTION_SIZE / sizeof(uint64_t)];
+		if (g_fault_wrapped[slot]) memcpy(cur, g_fault_action[slot], sizeof cur);
+		else if (TAWC_RAW(TAWC_SYS_rt_sigaction, slot ? SIGBUS : SIGSEGV, 0, (long)cur, 8, 0, 0))
+			return TAWC_EINVAL;
+		if (tawc_copy_to_guest(oldact, cur, sizeof cur) < 0) return TAWC_EFAULT;
+	}
+	if (!act) return 0;
+	int sig = slot ? SIGBUS : SIGSEGV;
+	memcpy(g_fault_action[slot], act, sizeof g_fault_action[slot]);
+	if (act[0] <= 1 /* SIG_DFL, SIG_IGN */) {
+		g_fault_wrapped[slot] = 0;
+		return TAWC_RAW(TAWC_SYS_rt_sigaction, sig, (long)act, 0, 8, 0, 0);
+	}
+	uint64_t ours[TAWC_KERN_SIGACTION_SIZE / sizeof(uint64_t)];
+	memcpy(ours, act, sizeof ours);
+	ours[0] = (uint64_t)(uintptr_t)fault_log;
+	ours[1] = (act[1] | SA_SIGINFO) & ~(uint64_t)SA_RESETHAND;
+	g_fault_wrapped[slot] = 1;
+	return TAWC_RAW(TAWC_SYS_rt_sigaction, sig, (long)ours, 0, 8, 0, 0);
+}
+
 static long handle_rt_sigaction(const tawcroot_syscall_args *args,
 				ucontext_t *uc)
 {
@@ -187,6 +310,10 @@ static long handle_rt_sigaction(const tawcroot_syscall_args *args,
 			action[3] &= ~SIGSYS_BIT;
 			act = action;
 		}
+		int slot = fault_slot(sig);
+		if (slot >= 0 && sigsetsize == 8 &&
+		    (tawcroot_namespace.session & TAWC_NS_INIT_SESSION))
+			return fault_sigaction(slot, act ? action : 0, oldact);
 		long rv = TAWC_RAW(TAWC_SYS_rt_sigaction, args->a, (long)act,
 				   args->c, args->d, 0, 0);
 		if (rv == 0 && act) tawcroot_fastpath_note_handler(action[0]);
