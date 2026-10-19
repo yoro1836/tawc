@@ -170,6 +170,7 @@ SRC_C_PROD=(
     "$TAWCROOT_DIR/src/proc_tcp.c"
     "$TAWCROOT_DIR/src/namespace.c"
     "$TAWCROOT_DIR/src/cgroup.c"
+    "$TAWCROOT_DIR/src/mounts.c"
     "$TAWCROOT_DIR/src/main.c"
     "$TAWCROOT_DIR/src/io.c"
     "$TAWCROOT_DIR/src/strings.c"

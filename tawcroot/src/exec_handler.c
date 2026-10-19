@@ -260,7 +260,8 @@ static long prepare(const char *path, int argc,
 		 * tawcroot_path_add_bind's empty-dst -EINVAL. */
 		uint32_t nb = 0;
 		for (size_t i = 0; i < tawcroot_n_binds; i++) {
-			if (!tawcroot_binds[i].active) continue;
+			/* Mount-table binds are re-mirrored by the new image. */
+			if (!tawcroot_binds[i].active || tawcroot_binds[i].mount_id) continue;
 			bind_src_arr[nb] = tawcroot_binds[i].src;
 			bind_dst_arr[nb] = tawcroot_binds[i].dst;
 			bind_ro_arr[nb]  = (unsigned char)

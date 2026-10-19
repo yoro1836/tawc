@@ -26,6 +26,7 @@
 #include <sys/stat.h>
 #include "io.h"
 #include "path.h"
+#include "mounts.h"
 #include "namespace.h"
 #include "path_scratch.h"
 
@@ -364,48 +365,32 @@ static long guest_dir(const char *path, char *out)
 
 /* API filesystems an init mounts at boot and the runtime already
  * provides (as binds or real directories). */
-static int api_mount_point(const char *dir)
-{
-	static const char *const points[] = {
-		"/proc", "/sys", "/dev", "/dev/shm", "/dev/pts", "/run",
-		"/sys/fs/cgroup",
-	};
-	for (size_t i = 0; i < sizeof points / sizeof points[0]; i++)
-		if (tawc_streq(dir, points[i])) return 1;
-	return 0;
-}
-
 static long handle_mount(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
-	/* A bounded path-view operation, not a kernel mount or security boundary.
-	 * Recursive mounts, filesystem creation and propagation remain unsupported. */
+	/* A bounded path-view operation, not a kernel mount or security boundary. */
 	unsigned long flags = (unsigned long)args->d;
-	if (flags == MS_BIND)
-		return tawcroot_path_bind_guest((const char *)args->a, (const char *)args->b);
-	if (!(tawcroot_namespace.session & TAWC_NS_INIT_SESSION)) return TAWC_EPERM;
-	/* An --init session boots a real init, which mounts its API
-	 * filesystems over what the runtime already provides. Pretend for
-	 * those: new mounts there, remounts and propagation changes
-	 * anywhere succeed without touching the view. Everything
-	 * else stays EPERM so the init takes its unprivileged fallbacks. */
+	if (!(tawcroot_namespace.session & TAWC_NS_INIT_SESSION))
+		return flags == MS_BIND ? tawcroot_path_bind_guest((const char *)args->a,
+			(const char *)args->b) : TAWC_EPERM;
+	/* An --init session boots a real init: tmpfs and bind mounts go
+	 * through the session's mount table (mounts.c); propagation
+	 * changes are accepted and ignored. */
 	if (!(flags & ~(MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE | MS_REC)) &&
 	    (flags & (MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE)))
 		return 0;
-	if (flags & MS_MOVE || (flags & (MS_BIND | MS_REMOUNT)) == MS_BIND) return TAWC_EPERM;
-	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
-	char *dir = scratch->buf[0];
-	long e = guest_dir((const char *)args->b, dir);
-	if (e < 0) return e;
-	return (flags & MS_REMOUNT) || api_mount_point(dir) ? 0 : TAWC_EPERM;
+	return tawcroot_mounts_mount((const char *)args->a, (const char *)args->b,
+		(const char *)args->c, flags, (const char *)args->e);
 }
 
 static long handle_umount(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
 	if (!(tawcroot_namespace.session & TAWC_NS_INIT_SESSION)) return TAWC_EPERM;
-	/* Nothing was ever really mounted, so nothing is a mount point.
-	 * Success here would spin "umount until EINVAL" loops forever. */
+	long r = tawcroot_mounts_umount((const char *)args->a, (int)args->b);
+	if (r != TAWC_ENOSYS) return r;
+	/* Not an emulated mount: nothing else is a mount point. Success
+	 * here would spin "umount until EINVAL" loops forever. */
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
 	long e = guest_dir((const char *)args->a, scratch->buf[0]);
 	return e == TAWC_ENOENT ? e : TAWC_EINVAL;
@@ -424,6 +409,12 @@ void tawcroot_control_register(void)
 	if (TAWC_RAW(TAWC_SYS_waitid, 3 /* P_PIDFD */, -1, 0,
 	             5 /* WEXITED | WNOHANG */, 0, 0) == TAWC_EINVAL)
 		tawcroot_dispatch_install(TAWC_SYS_pidfd_open, tawcroot_deny_enosys);
+	/* The new mount API and statmount/listmount would act on host
+	 * paths and mounts; ENOSYS sends callers (systemd, libmount) back
+	 * to mount(2) and /proc/self/mountinfo, which we emulate. */
+	static const int new_mount_api[] = { 428, 429, 430, 431, 432, 433, 442, 457, 458 };
+	for (size_t i = 0; i < sizeof new_mount_api / sizeof new_mount_api[0]; i++)
+		tawcroot_dispatch_install(new_mount_api[i], tawcroot_deny_enosys);
 	tawcroot_dispatch_install(TAWC_SYS_seccomp,         handle_seccomp);
 	tawcroot_dispatch_install(TAWC_SYS_prctl,           handle_prctl);
 	tawcroot_dispatch_install(TAWC_SYS_rt_sigaction,    handle_rt_sigaction);

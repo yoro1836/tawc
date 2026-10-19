@@ -25,6 +25,7 @@
 #include "fdtab.h"
 #include "io.h"
 #include "linkstore.h"
+#include "namespace.h"
 #include "path.h"
 #include "stats.h"
 #include "path_scratch.h"
@@ -403,6 +404,29 @@ static unsigned long proc_dev(void)
 	return d;
 }
 
+/* Drop /proc/<pid> entries of processes outside the fake pid
+ * namespace from a linux_dirent64 buffer. Returns the kept length. */
+static long hide_host_pids(char *buf, long n)
+{
+	long out = 0;
+	for (long off = 0; off < n;) {
+		unsigned short reclen;
+		memcpy(&reclen, buf + off + 16, sizeof reclen);
+		if (reclen == 0 || off + reclen > n) break;
+		const char *name = buf + off + 19;
+		long pid = 0;
+		const char *c = name;
+		for (; *c >= '0' && *c <= '9'; ++c) pid = pid * 10 + (*c - '0');
+		int keep = *c || !pid || tawcroot_namespace_is_guest(pid);
+		if (keep) {
+			if (out != off) memmove(buf + out, buf + off, reclen);
+			out += reclen;
+		}
+		off += reclen;
+	}
+	return out;
+}
+
 static long handle_getdents64(const tawcroot_syscall_args *args,
 			      ucontext_t *uc)
 {
@@ -413,7 +437,8 @@ static long handle_getdents64(const tawcroot_syscall_args *args,
 
 	long n = TAWC_RAW(TAWC_SYS_getdents64, fd, (long)buf,
 	                  (long)count, 0, 0, 0);
-	if (n <= 0 || tawcroot_n_reserved_fds == 0) return n;
+	if (n <= 0 || (tawcroot_n_reserved_fds == 0 && !tawcroot_namespace.init_pid))
+		return n;
 
 	/* Classify the directory by filesystem first: an fstat is a
 	 * fraction of the /proc/self/fd readlink, and only procfs
@@ -448,6 +473,17 @@ static long handle_getdents64(const tawcroot_syscall_args *args,
 	long ln = tawc_readlinkat(AT_FDCWD, self_path,
 	                          proc_link, TAWCROOT_PATH_SCRATCH_SIZE);
 	if (ln <= 0 || ln >= (long)TAWCROOT_PATH_SCRATCH_SIZE) return n;
+	if (ln == 5 && tawcroot_namespace.init_pid &&
+	    tawc_starts_with(proc_link, "/proc")) {
+		/* /proc lists guest processes only. */
+		for (;;) {
+			long kept = hide_host_pids(buf, n);
+			if (kept > 0) return kept;
+			n = TAWC_RAW(TAWC_SYS_getdents64, fd, (long)buf,
+			             (long)count, 0, 0, 0);
+			if (n <= 0) return n;
+		}
+	}
 	if (!tawcroot_dirent_filter_is_proc_fd_link(proc_link, ln)) return n;
 
 	/* Re-issue until a batch survives filtering or the kernel truly

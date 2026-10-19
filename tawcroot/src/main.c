@@ -47,6 +47,7 @@
 #include "linkstore.h"
 #include "namespace.h"
 #include "cgroup.h"
+#include "mounts.h"
 #include "loader_exec.h"
 #include "path.h"
 #include "pathcache.h"
@@ -511,6 +512,8 @@ __attribute__((noreturn)) static void prod_main(int argc, char **argv)
 		tawc_io_str("tawcroot: --init setup failed\n");
 		tawc_exit_group(96);
 	}
+	/* Without a store there is no mount table and mount(2) stays EPERM. */
+	if (init) (void)tawcroot_mounts_setup();
 	if (host_user) {
 		tawc_identity id = { 0 };
 		id.ruid = id.euid = id.suid = id.fsuid = (uint32_t)tawc_getuid();

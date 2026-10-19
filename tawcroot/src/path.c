@@ -33,6 +33,7 @@
 #include "fdtab.h"
 #include "io.h"
 #include "linkstore.h"
+#include "mounts.h"
 #include "namespace.h"
 #include "path.h"
 #include "path_oracle.h"
@@ -425,7 +426,16 @@ long tawcroot_path_add_bind(const char *src_host, const char *dst_guest,
                             int read_only)
 {
 	if (tawcroot_n_binds >= TAWCROOT_MAX_BINDS) return TAWC_ENOSPC;
-	struct tawcroot_bind *b = &tawcroot_binds[tawcroot_n_binds];
+	long e = tawcroot_path_fill_bind(&tawcroot_binds[tawcroot_n_binds],
+					 src_host, dst_guest, read_only);
+	if (e) return e;
+	tawcroot_n_binds++;
+	return 0;
+}
+
+long tawcroot_path_fill_bind(struct tawcroot_bind *b, const char *src_host,
+			     const char *dst_guest, int read_only)
+{
 	if (tawc_strlen(src_host) >= sizeof b->src) return TAWC_ENAMETOOLONG;
 
 	/* Normalize dst through the lexical fold so it matches folded
@@ -481,12 +491,11 @@ long tawcroot_path_add_bind(const char *src_host, const char *dst_guest,
 
 	b->src_fd    = (int)resv;
 	b->read_only = read_only ? 1 : 0;
-	b->active    = 1;
 	b->dst_len   = n;   /* b->dst already holds the folded form */
-
 	/* Keep the full canonical source for reverse translation and exec;
-	 * src_fd anchors either that directory or the file's parent. */
-	tawcroot_n_binds++;
+	 * src_fd anchors either that directory or the file's parent.
+	 * Published last: readers skip inactive slots. */
+	__atomic_store_n(&b->active, 1, __ATOMIC_RELEASE);
 	return 0;
 }
 
@@ -875,6 +884,7 @@ static tawcroot_path_result path_translate(const char *guest_path,
 		r.err = TAWC_ENOENT;
 		return r;
 	}
+	tawcroot_mounts_sync();
 
 	/* No lazy-reopen needed: handle_close fake-succeeds for reserved
 	 * fds, so the guest cannot kill rootfs_fd or bind src_fds. The

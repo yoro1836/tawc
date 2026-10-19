@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include "cgroup.h"
+#include "mounts.h"
 #include "errno_neg.h"
 #include "exec_state.h"
 #include "identity.h"
@@ -546,6 +547,7 @@ void tawcroot_loader_exec_child(int state_fd, const char *platform)
 	tawcroot_namespace = st.namespaces;
 	tawcroot_namespace_restore();
 	tawcroot_cgroup_exec();
+	tawcroot_mounts_attach();
 	tawcroot_namespace_tie_to_init();
 
 	/* Don't bother closing — we're about to hand control to the guest

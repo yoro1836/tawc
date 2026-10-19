@@ -1,13 +1,17 @@
 /* `tawcroot --init`: the first guest process is a fake pid 1. Checks
  * getpid/getppid on both sides, orphan adoption (subreaper), and that
  * init only receives signals it has a handler for, as a real namespace
- * init does.
+ * init does. With a host pid as argv[1], also checks that the guest
+ * can neither see nor signal it, kill(-1) included.
  *
  * Exit 42 on success; every other code names the failed step. pids go
  * through raw syscalls so libc caching can't hide the translation. */
 
 #define _GNU_SOURCE
+#include <dirent.h>
+#include <errno.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -46,7 +50,38 @@ static int child_signals_init(void)
 	return 0;
 }
 
-int main(void)
+static int listed(long pid)
+{
+	DIR *d = opendir("/proc");
+	if (!d) return -1;
+	int found = 0;
+	for (struct dirent *e; (e = readdir(d));)
+		if (atol(e->d_name) == pid) found = 1;
+	closedir(d);
+	return found;
+}
+
+/* The host process `host` stays out of reach; kill(-1) still reaches
+ * the guest's own processes. */
+static int isolation(long host)
+{
+	if (kill((pid_t)host, 0) == 0 || errno != ESRCH) return 1;
+	if (syscall(SYS_pidfd_open, host, 0) >= 0 || errno != ESRCH) return 2;
+	if (syscall(SYS_tgkill, host, host, 0) == 0 || errno != ESRCH) return 3;
+	if (listed(host) != 0) return 4;
+
+	pid_t c = fork();
+	if (c < 0) return 5;
+	if (c == 0) { for (;;) pause(); }
+	if (listed(c) != 1) return 6;
+	if (kill(-1, SIGTERM) != 0) return 7;
+	int status = 0;
+	if (waitpid(c, &status, 0) != c || !WIFSIGNALED(status) ||
+	    WTERMSIG(status) != SIGTERM) return 8;
+	return 0;
+}
+
+int main(int argc, char **argv)
 {
 	if (raw_getpid() != 1) return 1;
 	if (raw_getppid() != 0) return 2;
@@ -82,5 +117,9 @@ int main(void)
 	if (r != 0) return 20 + r;
 	for (int i = 0; i < 500 && !got_usr1; i++) usleep(10000);
 	if (!got_usr1) return 30;
+	if (argc > 1) {
+		int e = isolation(atol(argv[1]));
+		if (e) return 40 + e;
+	}
 	return 42;
 }

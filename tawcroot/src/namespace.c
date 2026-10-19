@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include "namespace.h"
 #include "cgroup.h"
+#include "mounts.h"
 #include "chroot.h"
 #include "dispatch.h"
 #include "errno_neg.h"
@@ -34,7 +35,10 @@ int tawcroot_namespace_probe(const char *path)
  * Inherited across fork/exec, as is the namespace state that implies
  * it, so "already active" means "already trapped". */
 static const int user_lazy[] = { TAWC_SYS_write };
-static const int pid_lazy[] = { TAWC_SYS_getpid, TAWC_SYS_getppid, __NR_kill, __NR_tgkill };
+static const int pid_lazy[] = {
+    TAWC_SYS_getpid, TAWC_SYS_getppid, __NR_kill, __NR_tgkill, __NR_tkill,
+    __NR_rt_sigqueueinfo, __NR_rt_tgsigqueueinfo, TAWC_SYS_pidfd_open,
+};
 
 static long new_user(void)
 {
@@ -152,6 +156,8 @@ static size_t rewrite_stat(const char *in, char *out, size_t cap, long pid)
 }
 
 /* /proc/<pid>/status: the Tgid/Pid/PPid/NS* pid lines. */
+static int put_cap(char *out, size_t cap, size_t *n, const char *line, long pid);
+
 static size_t rewrite_status(const char *in, char *out, size_t cap, long pid)
 {
     static const char *const keys[] = { "Tgid:", "Pid:", "PPid:", "TracerPid:",
@@ -163,7 +169,8 @@ static size_t rewrite_status(const char *in, char *out, size_t cap, long pid)
         size_t k = 0;
         for (; k < sizeof keys / sizeof keys[0]; ++k) if (tawc_starts_with(line, keys[k])) break;
         if (k == sizeof keys / sizeof keys[0]) {
-            for (const char *d = line; d < end && n + 1 < cap; ++d) out[n++] = *d;
+            if (!put_cap(out, cap, &n, line, pid))
+                for (const char *d = line; d < end && n + 1 < cap; ++d) out[n++] = *d;
         } else {
             const char *d = line;
             while (d < end && *d != ':') out[n++] = *d++;
@@ -180,6 +187,55 @@ static size_t rewrite_status(const char *in, char *out, size_t cap, long pid)
         line = *end ? end + 1 : end;
     }
     return n;
+}
+
+int tawcroot_namespace_is_userns_link(const char *path)
+{
+    if (!(tawcroot_namespace.session & TAWC_NS_INIT_SESSION) || tawcroot_namespace.user ||
+        !tawc_starts_with(path, "/proc/")) return 0;
+    const char *p = path + 6;
+    if (tawc_starts_with(p, "self/")) p += 5;
+    else if (tawc_starts_with(p, "thread-self/")) p += 12;
+    else {
+        const char *d = p;
+        while (*p >= '0' && *p <= '9') ++p;
+        if (p == d || *p++ != '/') return 0;
+    }
+    if (tawc_starts_with(p, "task/")) {
+        for (p += 5; *p >= '0' && *p <= '9'; ++p) {}
+        if (*p++ != '/') return 0;
+    }
+    return tawc_streq(p, "ns/user");
+}
+
+/* Cap* lines of an init session's /proc/<pid>/status: the shadow set
+ * for the caller, the session's default set for other processes. */
+static int put_cap(char *out, size_t cap, size_t *n, const char *line, long pid)
+{
+    static const char *const keys[] = { "CapInh:", "CapPrm:", "CapEff:", "CapBnd:", "CapAmb:" };
+    const struct tawc_namespace *ns = &tawcroot_namespace;
+    if (!(ns->session & TAWC_NS_INIT_SESSION) || ns->user) return 0;
+    int k = 0;
+    for (; k < 5; ++k) if (tawc_starts_with(line, keys[k])) break;
+    if (k == 5) return 0;
+    int self = pid == tawc_getpid();
+    uint64_t v = 0, dflt = 0xfdecafffu;
+    switch (k) {
+    case 0: v = self ? ns->capabilities[2] | (uint64_t)ns->capabilities[5] << 32 : 0; break;
+    case 1: v = self ? ns->capabilities[1] | (uint64_t)ns->capabilities[4] << 32 : dflt; break;
+    case 2: v = self ? ns->capabilities[0] | (uint64_t)ns->capabilities[3] << 32 : dflt; break;
+    case 3: v = self ? ~(ns->capbset_dropped[0] | (uint64_t)ns->capbset_dropped[1] << 32) &
+                       0x1ffffffffffULL : dflt; break;
+    default: v = 0;
+    }
+    (void)tawc_str_append(out, cap, n, keys[k]);
+    (void)tawc_str_append(out, cap, n, "\t");
+    for (int sh = 60; sh >= 0; sh -= 4) {
+        if (*n + 1 >= cap) break;
+        out[(*n)++] = "0123456789abcdef"[(v >> sh) & 0xf];
+    }
+    out[*n] = 0;
+    return 1;
 }
 
 /* With a fake init, /proc/<pid>/stat and status show it as pid 1 and as
@@ -204,9 +260,35 @@ long tawcroot_namespace_proc_open(const char *path, int flags)
         while (*p >= '0' && *p <= '9') ++p;
         if (*p++ != '/') return TAWC_ENOSYS;
     }
+    TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+    /* An init session looks like a user-namespaced container: root
+     * maps to the app's single id, so inits skip what needs real root. */
+    int map = tawc_streq(p, "uid_map") ? 1 : tawc_streq(p, "gid_map") ? 2 :
+        tawc_streq(p, "setgroups") ? 3 : 0;
+    if (map && (tawcroot_namespace.session & TAWC_NS_INIT_SESSION)) {
+        char *text = scratch->buf[0];
+        size_t n = 0;
+        if (map == 3) (void)tawc_str_append(text, 64, &n, "deny\n");
+        else {
+            long id = TAWC_RAW(map == 1 ? TAWC_SYS_getuid : TAWC_SYS_getgid, 0, 0, 0, 0, 0, 0);
+            long v[3] = { 0, id, 1 };
+            for (int i = 0; i < 3; ++i) {
+                char num[16];
+                size_t k = 0;
+                (void)tawc_str_append_dec(num, sizeof num, &k, v[i]);
+                for (size_t pad = k; pad < 10; ++pad) text[n++] = ' ';
+                for (size_t j = 0; j < k; ++j) text[n++] = num[j];
+                text[n++] = i < 2 ? ' ' : '\n';
+            }
+        }
+        long copy = tawc_memfd_create("tawcroot-map", (flags & O_CLOEXEC) ? 1 : 0);
+        if (copy < 0) return copy;
+        if (tawc_write((int)copy, text, n) != (long)n) { tawc_close((int)copy); return TAWC_EIO; }
+        (void)tawc_lseek((int)copy, 0, SEEK_SET);
+        return copy;
+    }
     int status = tawc_streq(p, "status");
     if (!status && !tawc_streq(p, "stat")) return TAWC_ENOSYS;
-    TAWCROOT_PATH_SCRATCH_AUTO(scratch);
     char *real = scratch->buf[0], *in = scratch->buf[1], *out = scratch->buf[2];
     size_t n = 0;
     if (tawc_str_append(real, TAWCROOT_PATH_SCRATCH_SIZE, &n, "/proc/") ||
@@ -288,11 +370,18 @@ long tawcroot_namespace_init_session(void)
     /* A real init starts with every capability; services drop from
      * there. Emulated like a user namespace's (namespace_cap). */
     struct tawc_namespace *ns = &tawcroot_namespace;
+    static const int init_lazy[] = { TAWC_SYS_fstatfs };
+    r = tawcroot_install_lazy_filter(init_lazy, sizeof init_lazy / sizeof init_lazy[0]);
+    if (r) return r;
     ns->session |= TAWC_NS_INIT_SESSION;
     if (!ns->user) {
-        ns->capabilities[0] = ns->capabilities[1] = 0xffffffffu;
-        ns->capabilities[3] = ns->capabilities[4] = 0x1ff;
+        /* systemd-nspawn's default set: no SYS_MODULE, SYS_RAWIO,
+         * SYS_TIME, MAC_*, ... so units needing those skip cleanly. */
+        ns->capabilities[0] = ns->capabilities[1] = 0xfdecafffu;
+        ns->capabilities[3] = ns->capabilities[4] = 0;
         ns->capabilities[2] = ns->capabilities[5] = 0;
+        ns->capbset_dropped[0] = ~0xfdecafffu;
+        ns->capbset_dropped[1] = ~0u;
     }
     return 0;
 }
@@ -475,24 +564,150 @@ static int catches(int pid, int sig)
     return (int)(mask >> (sig - 1) & 1);
 }
 
-/* Map pid 1 to the fake init. Like a real namespace init, it only gets
- * signals it has a handler for; SIGKILL and SIGSTOP from inside are
- * dropped too. Signal 0 still probes. */
+/* ppid and pgrp from /proc/<pid>/stat. */
+static long stat_ids(long pid, long *ppid, long *pgrp)
+{
+    char buf[256];
+    size_t n = 0;
+    if (tawc_str_append(buf, sizeof buf, &n, "/proc/") ||
+        tawc_str_append_dec(buf, sizeof buf, &n, pid) ||
+        tawc_str_append(buf, sizeof buf, &n, "/stat")) return TAWC_ESRCH;
+    long fd = tawc_openat(AT_FDCWD, buf, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) return TAWC_ESRCH;
+    long len = tawc_read((int)fd, buf, sizeof buf - 1);
+    tawc_close((int)fd);
+    if (len <= 0) return TAWC_ESRCH;
+    buf[len] = 0;
+    const char *p = 0;
+    for (long i = 0; i < len; ++i) if (buf[i] == ')') p = buf + i + 1;
+    if (!p) return TAWC_ESRCH;
+    /* " S ppid pgrp ..." */
+    long v[2] = { 0, 0 };
+    int field = 0;
+    for (; *p && field < 4; ++p) {
+        if (*p == ' ') { ++field; continue; }
+        if (field >= 2 && *p >= '0' && *p <= '9') v[field - 2] = v[field - 2] * 10 + (*p - '0');
+    }
+    if (field < 3) return TAWC_ESRCH;
+    *ppid = v[0];
+    *pgrp = v[1];
+    return 0;
+}
+
+/* The init or one of its descendants. Orphans reparent to the init (a
+ * subreaper), so every guest process keeps a parent chain to it. */
+int tawcroot_namespace_is_guest(long pid)
+{
+    long init = tawcroot_namespace.init_pid;
+    if (!init) return 1;
+    for (int depth = 0; depth < 128 && pid > 1; ++depth) {
+        if (pid == init) return 1;
+        long ppid, pgrp;
+        if (stat_ids(pid, &ppid, &pgrp)) return 0;
+        pid = ppid;
+    }
+    return 0;
+}
+
+/* A thread id of a guest process: a guest tgid, or one of init's
+ * threads (whose /proc/<tid>/stat ppid is init's real parent). */
+static int guest_tid(long tid)
+{
+    if (tawcroot_namespace_is_guest(tid)) return 1;
+    char path[64] = "/proc/";
+    size_t n = 6;
+    if (tawc_str_append_dec(path, sizeof path, &n, tawcroot_namespace.init_pid) ||
+        tawc_str_append(path, sizeof path, &n, "/task/") ||
+        tawc_str_append_dec(path, sizeof path, &n, tid)) return 0;
+    return TAWC_RAW(TAWC_SYS_faccessat, AT_FDCWD, (long)path, 0, 0, 0, 0) == 0;
+}
+
+/* Init drops signals it has no handler for, as a namespace init does
+ * for senders inside; SIGKILL and SIGSTOP included. */
+static int init_drops(long pid, long sig)
+{
+    int init = tawcroot_namespace.init_pid;
+    return pid == init && sig > 0 && sig < 65 && !catches(init, (int)sig);
+}
+
+/* kill(0), kill(-pgrp) and kill(-1) over guest processes only: without
+ * a pid namespace the kernel's versions reach the app's own processes. */
+static long kill_many(long pgrp, long sig)
+{
+    long self = tawc_getpid(), init = tawcroot_namespace.init_pid;
+    long dir = tawc_openat(AT_FDCWD, "/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+    if (dir < 0) return dir;
+    TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+    char *buf = scratch->buf[0];
+    long sent = 0, err = TAWC_ESRCH;
+    for (;;) {
+        long n = TAWC_RAW(TAWC_SYS_getdents64, dir, (long)buf, TAWCROOT_PATH_SCRATCH_SIZE, 0, 0, 0);
+        if (n <= 0) break;
+        for (long off = 0; off < n;) {
+            unsigned short reclen;
+            memcpy(&reclen, buf + off + 16, sizeof reclen);
+            const char *name = buf + off + 19;
+            off += reclen;
+            long pid = 0;
+            const char *c = name;
+            for (; *c >= '0' && *c <= '9'; ++c) pid = pid * 10 + (*c - '0');
+            if (*c || !pid) continue;
+            long ppid, g;
+            if (pgrp == -1) {
+                if (pid == self || pid == init) continue;
+            } else if (stat_ids(pid, &ppid, &g) || g != pgrp) continue;
+            if (!tawcroot_namespace_is_guest(pid)) continue;
+            if (init_drops(pid, sig)) { sent = 1; continue; }
+            long r = TAWC_RAW(__NR_kill, pid, sig, 0, 0, 0, 0);
+            if (!r) sent = 1;
+            else if (r == TAWC_EPERM) err = r;
+        }
+    }
+    tawc_close((int)dir);
+    return sent ? 0 : err;
+}
+
+/* Signals from guests reach guests only, with pid 1 mapped to the fake
+ * init. Like a real namespace init, the init only gets signals it has a
+ * handler for. Signal 0 still probes. */
 static long namespace_signal(const tawcroot_syscall_args *a, ucontext_t *uc)
 {
     (void)uc;
-    int init = tawcroot_namespace.init_pid;
+    long init = tawcroot_namespace.init_pid;
     long pid = a->a, tid = a->b;
-    long sig = a->nr == __NR_tgkill ? a->c : a->b;
     if (init && pid == 1) pid = init;
-    if (init && a->nr == __NR_tgkill && tid == 1) tid = init;
-    if (init && pid == init && sig > 0 && sig < 65 &&
-        (a->nr == __NR_kill || tid == init) && !catches(init, (int)sig)) {
-        long probe = TAWC_RAW(a->nr, pid, a->nr == __NR_tgkill ? tid : 0, 0, 0, 0, 0);
-        return probe < 0 ? probe : 0;
+    if (init && tid == 1 && (a->nr == __NR_tgkill || a->nr == __NR_rt_tgsigqueueinfo)) tid = init;
+    if (!init) return TAWC_RAW(a->nr, a->a, a->b, a->c, a->d, 0, 0);
+    switch (a->nr) {
+    case __NR_kill:
+        if (pid == -1) return kill_many(-1, a->b);
+        if (pid <= 0) return kill_many(pid ? -pid : TAWC_RAW(__NR_getpgid, 0, 0, 0, 0, 0, 0), a->b);
+        if (!tawcroot_namespace_is_guest(pid)) return TAWC_ESRCH;
+        if (init_drops(pid, a->b)) {
+            long probe = TAWC_RAW(__NR_kill, pid, 0, 0, 0, 0, 0);
+            return probe < 0 ? probe : 0;
+        }
+        return TAWC_RAW(__NR_kill, pid, a->b, 0, 0, 0, 0);
+    case __NR_tkill:
+        if (!guest_tid(pid)) return TAWC_ESRCH;
+        if (pid == init && init_drops(pid, a->b)) return 0;
+        return TAWC_RAW(__NR_tkill, pid, a->b, 0, 0, 0, 0);
+    case __NR_tgkill:
+    case __NR_rt_tgsigqueueinfo:
+        if (pid <= 0 || !tawcroot_namespace_is_guest(pid)) return pid <= 0 ? TAWC_EINVAL : TAWC_ESRCH;
+        if (tid == init && init_drops(pid, a->c)) {
+            long probe = TAWC_RAW(__NR_tgkill, pid, tid, 0, 0, 0, 0);
+            return probe < 0 ? probe : 0;
+        }
+        return TAWC_RAW(a->nr, pid, tid, a->c, a->d, 0, 0);
+    case __NR_rt_sigqueueinfo:
+        if (pid <= 0 || !tawcroot_namespace_is_guest(pid)) return TAWC_ESRCH;
+        if (init_drops(pid, a->b)) return 0;
+        return TAWC_RAW(a->nr, pid, a->b, a->c, 0, 0, 0);
+    default: /* pidfd_open */
+        if (pid <= 0 || !tawcroot_namespace_is_guest(pid)) return pid <= 0 ? TAWC_EINVAL : TAWC_ESRCH;
+        return TAWC_RAW(a->nr, pid, a->b, 0, 0, 0, 0);
     }
-    if (a->nr == __NR_tgkill) return TAWC_RAW(a->nr, pid, tid, a->c, 0, 0, 0);
-    return TAWC_RAW(a->nr, pid, a->b, 0, 0, 0, 0);
 }
 
 void tawcroot_namespace_register(void)
@@ -506,4 +721,12 @@ void tawcroot_namespace_register(void)
     tawcroot_dispatch_install_lazy(TAWC_SYS_write, namespace_write);
     tawcroot_dispatch_install_lazy(__NR_kill, namespace_signal);
     tawcroot_dispatch_install_lazy(__NR_tgkill, namespace_signal);
+    tawcroot_dispatch_install_lazy(__NR_tkill, namespace_signal);
+    tawcroot_dispatch_install_lazy(__NR_rt_sigqueueinfo, namespace_signal);
+    tawcroot_dispatch_install_lazy(__NR_epoll_ctl, tawcroot_mounts_epoll_ctl);
+    tawcroot_dispatch_install_lazy(TAWC_SYS_fstatfs, tawcroot_mounts_fstatfs);
+    tawcroot_dispatch_install_lazy(__NR_rt_tgsigqueueinfo, namespace_signal);
+    /* Kernels with a broken pidfd_open keep their base-filter deny. */
+    if (!tawcroot_dispatch_get(TAWC_SYS_pidfd_open))
+        tawcroot_dispatch_install_lazy(TAWC_SYS_pidfd_open, namespace_signal);
 }
