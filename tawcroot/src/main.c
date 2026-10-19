@@ -222,7 +222,7 @@ static __attribute__((noreturn)) void usage(int code)
 	            "  tawcroot-testhost -r ROOTFS [-b SRC:DST[:ro]]...\n");
 #else
 	tawc_io_str("tawcroot: usage:\n"
-	            "  tawcroot -r ROOTFS [--host-user] [--init] [--cgroup] [-b SRC:DST[:ro]]... -- CMD [ARGS...]\n"
+	            "  tawcroot -r ROOTFS [--host-user] [--init [--cgroup] | --join] [-b SRC:DST[:ro]]... -- CMD [ARGS...]\n"
 	            "  tawcroot --exec-child <fd>\n");
 #endif
 	tawc_exit_group(code);
@@ -470,6 +470,7 @@ __attribute__((noreturn)) static void prod_main(int argc, char **argv)
 	int         host_user = 0;
 	int         init      = 0;
 	int         cgroup    = 0;
+	int         join      = 0;
 
 	int i = 1;
 	while (i < argc) {
@@ -483,6 +484,9 @@ __attribute__((noreturn)) static void prod_main(int argc, char **argv)
 			i++;
 		} else if (tawc_streq(argv[i], "--init")) {
 			init = 1;
+			i++;
+		} else if (tawc_streq(argv[i], "--join")) {
+			join = 1;
 			i++;
 		} else if (tawc_streq(argv[i], "--cgroup")) {
 			cgroup = 1;
@@ -503,6 +507,7 @@ __attribute__((noreturn)) static void prod_main(int argc, char **argv)
 		}
 	}
 	if (!rootfs || cmd_start < 0 || cmd_start >= argc) usage(2);
+	if (join && (init || cgroup)) usage(2);
 
 	prod_rootfs_init(rootfs, bind_specs, n_binds);
 	if (cgroup && tawcroot_cgroup_setup() < 0) {
@@ -516,7 +521,12 @@ __attribute__((noreturn)) static void prod_main(int argc, char **argv)
 	/* Without a store there is no mount table and mount(2) stays EPERM. */
 	if (init) (void)tawcroot_mounts_setup();
 	if (init) tawcroot_uts_setup();
-	if (init) tawcroot_namespace_ids_setup();
+	if (init) tawcroot_namespace_session_setup();
+	/* Enter a running `--init` session: same mounts, cgroups, names. */
+	if (join && tawcroot_namespace_join() < 0) {
+		tawc_io_str("tawcroot: --join: no running --init session\n");
+		tawc_exit_group(97);
+	}
 	if (host_user) {
 		tawc_identity id = { 0 };
 		id.ruid = id.euid = id.suid = id.fsuid = (uint32_t)tawc_getuid();

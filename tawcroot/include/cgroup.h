@@ -5,6 +5,7 @@
 /* Init-time: back /sys/fs/cgroup with an empty <store>/cgroup tree and
  * put the calling process in the root cgroup. 0 or -errno. */
 long tawcroot_cgroup_setup(void);
+long tawcroot_cgroup_join(void);
 
 /* Whether (fd, suffix), as translated for a syscall, lies in the fake
  * cgroupfs. Writes its cgroup-relative path ("" for the root) to `rel`. */

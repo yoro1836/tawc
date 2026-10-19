@@ -121,6 +121,27 @@ BSS.
 - `capget` answers libcap-ng's version probe like the kernel (writes
   the v3 version, `EINVAL`).
 
+## Joining a session (`--join`)
+`tawcroot -r <rootfs> [-b ...] --join -- CMD` runs CMD inside the
+rootfs's running init session, like `nsenter`/`machinectl shell`. The
+init publishes `<store>/init` (pid, starttime, session flags) before
+exec; `--join` checks it is still alive, takes the same pid view,
+capabilities, mount table, hostname and cgroup tree (the joiner sits in
+the root cgroup), and records `<store>/joined/<pid>` so its process tree
+counts as a guest for signals and `/proc` listings. With no live init
+it exits 97. Joiners keep their own `-b` binds, and binds win over
+emulated mounts, so don't pass a `/run` bind to a joiner. Orphans of a
+joined tree reparent outside the session and drop out of it.
+
+App: the per-distro "Boot with systemd" setting (tawcroot installs,
+`Installation.systemdBoot`, `TawcrootMethod.ensureSystemd`) boots
+`/usr/lib/systemd/systemd` on the first spawn and `--join`s every spawn
+while it runs. The init gets the normal binds minus `/tmp/.X11-unix`
+(boot-time tmpfiles empties that dir, Xwayland's socket included) and
+`<install>/tawcroot/console.log` as `/dev/console`, so `console-getty`
+fails there. Turning the setting off sends SIGRTMIN+4 (poweroff). Not
+yet run on a device.
+
 ## Known boot failures
 
 Debian sid's systemd 257 boots to `graphical.target` with no failed

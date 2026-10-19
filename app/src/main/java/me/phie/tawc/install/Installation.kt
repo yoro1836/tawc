@@ -82,6 +82,12 @@ data class Installation(
      */
     val andoEnabled: Boolean = false,
     /**
+     * Boot the distro's systemd as pid 1 on first use and run every
+     * spawn inside that session (tawcroot only; see
+     * [TawcrootMethod.ensureSystemd]). Opt-in.
+     */
+    val systemdBoot: Boolean = false,
+    /**
      * Which [me.phie.tawc.install.distro.BootstrapFlavor] built this
      * rootfs (`"tarball"` / `"packages"`). Records written before the
      * field existed parse as [FLAVOR_TARBALL] — the only flavor that
@@ -131,6 +137,7 @@ data class Installation(
             put("hiddenDesktopIds", JSONArray(hiddenDesktopIds))
         }
         if (andoEnabled) put("andoEnabled", true)
+        if (systemdBoot) put("systemdBoot", true)
         if (importedAtMillis != null) put("importedAtMillis", importedAtMillis)
         if (importedFromPackage != null) put("importedFromPackage", importedFromPackage)
         if (osName != null) put("osName", osName)
@@ -300,6 +307,7 @@ data class Installation(
                     }
                 else emptyList(),
                 andoEnabled = obj.optBoolean("andoEnabled", false),
+                systemdBoot = obj.optBoolean("systemdBoot", false),
                 bootstrapFlavor = obj.optString("bootstrapFlavor", FLAVOR_TARBALL),
                 importedAtMillis = if (obj.has("importedAtMillis")) obj.getLong("importedAtMillis") else null,
                 importedFromPackage = if (obj.has("importedFromPackage") && !obj.isNull("importedFromPackage"))

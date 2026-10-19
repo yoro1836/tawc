@@ -347,6 +347,12 @@ $(OUT)/programs/static_net_check: $(SRC_TS)/integration/programs/static_net_chec
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -static -Wl,--build-id=none $< -o $@
 
+# static_join_check: static C (libc.a) — `--join` into a running
+# `--init` session. See the source for exit codes.
+$(OUT)/programs/static_join_check: $(SRC_TS)/integration/programs/static_join_check.c | $(OUT)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -static -Wl,--build-id=none $< -o $@
+
 # dynamic_exit42: ET_DYN linked against the host's glibc. The phase
 # 2.5 smoke loads both this binary AND its PT_INTERP-pointed ld.so,
 # synthesizes the right auxv, and jumps to ld.so. Success = ld.so ran

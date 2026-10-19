@@ -331,6 +331,19 @@ long tawcroot_cgroup_setup(void)
     return 0;
 }
 
+/* `--join`: the init session's tree, with the caller in the root. */
+long tawcroot_cgroup_join(void)
+{
+    TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+    char *path = scratch->buf[0];
+    long e = store_path(path, "/cgroup");
+    if (!e) e = tawcroot_path_add_bind(path, "sys/fs/cgroup", 0);
+    if (e < 0) return e;
+    tawcroot_namespace.session |= TAWC_NS_CGROUP;
+    join(0, 0, "");
+    return 0;
+}
+
 int tawcroot_cgroup_locate(int fd, const char *suffix, char *rel, size_t cap)
 {
     struct tawcroot_bind *b = cg_bind();
