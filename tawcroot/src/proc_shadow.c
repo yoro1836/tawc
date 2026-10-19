@@ -10,6 +10,7 @@
 #include "loader_map.h"
 #include "path.h"
 #include "proc_rewrite.h"
+#include "namespace.h"
 #include "proc_shadow.h"
 #include "proc_tcp.h"
 #include "raw_sys.h"
@@ -185,6 +186,10 @@ static const char *strip_proc_pid_prefix(const char *path, long *tid_out)
  * ("self") is ours by definition; numeric tids pay the status read. */
 static int resolve_mine(long tid)
 {
+	/* An --init session's init shares our root view. */
+	if (tid > 0 && tid == tawcroot_namespace.init_pid &&
+	    (tawcroot_namespace.session & TAWC_NS_INIT_SESSION))
+		return 1;
 	return tid < 0 ? 1 : is_my_tid(tid);
 }
 

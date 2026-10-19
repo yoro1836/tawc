@@ -141,6 +141,8 @@ build_static  static_drop_ids_devnull_eperm
 build_static  static_link_publish_argv12
 build_static  static_mknod_chr_fake
 build_static_c static_namespace_check
+build_static_c static_init_check
+build_static_c static_cgroup_check
 build_dynamic dynamic_exit42
 build_dynamic dynamic_argv_check
 build_dynamic dynamic_legacy_nr_probe

@@ -130,6 +130,10 @@ static bool build_rootfs(void)
 		  "static_io_uring_deny" },
 		{ TAWCROOT_STATIC_NAMESPACE_CHECK_BIN,
 		  "static_namespace_check" },
+		{ TAWCROOT_STATIC_INIT_CHECK_BIN,
+		  "static_init_check" },
+		{ TAWCROOT_STATIC_CGROUP_CHECK_BIN,
+		  "static_cgroup_check" },
 	};
 	for (size_t i = 0; i < sizeof fixtures / sizeof fixtures[0]; i++) {
 		snprintf(p, sizeof p, "%s/bin/%s",
@@ -627,6 +631,32 @@ test(prod_lazy_namespace_traps)
 	test_true(build_rootfs());
 	const char *args[] = {
 		"-r", FAKE_ROOTFS, "--", "/bin/static_namespace_check", NULL
+	};
+	test_int_eq(run_with(args), 42);
+	rh_rmrf(FAKE_ROOTFS);
+}
+
+/* --init makes the first guest process pid 1 without any kernel
+ * namespace: orphans reparent to it and it only gets signals it
+ * handles. */
+test(prod_init_session)
+{
+	rh_rmrf(FAKE_ROOTFS);
+	test_true(build_rootfs());
+	const char *args[] = {
+		"-r", FAKE_ROOTFS, "--init", "--", "/bin/static_init_check", NULL
+	};
+	test_int_eq(run_with(args), 42);
+	rh_rmrf(FAKE_ROOTFS);
+}
+
+test(prod_cgroup_session)
+{
+	rh_rmrf(FAKE_ROOTFS);
+	test_true(build_rootfs());
+	const char *args[] = {
+		"-r", FAKE_ROOTFS, "--init", "--cgroup", "--",
+		"/bin/static_cgroup_check", NULL
 	};
 	test_int_eq(run_with(args), 42);
 	rh_rmrf(FAKE_ROOTFS);

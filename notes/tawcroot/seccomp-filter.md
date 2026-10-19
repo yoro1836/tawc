@@ -55,6 +55,15 @@ filters only add TRAPs, are inherited across fork and the
 inherited the same way, so "already active" means "already trapped".
 Covered by `test_prod_features.c::prod_lazy_namespace_traps`.
 
+`tawcroot --init` stacks the same PID filter at startup, so the first
+guest process is pid 1 with no kernel namespace (the base for running
+systemd rootless). It is also `PR_SET_CHILD_SUBREAPER`, so orphans
+reparent to it and their `getppid()` maps to 1. `kill`/`tgkill` aimed
+at init drop signals missing from its `/proc/<pid>/status` SigCgt,
+SIGKILL included, like a namespace init; a SIGKILL from outside the
+guest still lands. Covered by `prod_init_session`.
+What else an init session emulates for systemd is in [systemd.md](systemd.md).
+
 Two filters are active: Android's existing `untrusted_app` filter
 (already loaded by zygote before we got control), plus our filter
 (installed on top). The kernel evaluates all filters on every

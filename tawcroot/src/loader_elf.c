@@ -123,10 +123,10 @@ void tawc_loader_seg_layout(uint64_t p_vaddr, uint64_t p_filesz,
 	seg->file_offset    = off_lo;
 	seg->file_size      = file_size;
 
-	/* BSS partial-page slice: bytes from end_file up to fhi.
-	 * If end_file == fhi (file ends exactly on a page boundary)
-	 * the slice is empty. */
-	seg->bss_partial_lo = (uintptr_t)end_file;
+	/* BSS partial-page slice: bytes from end_file up to fhi. Empty
+	 * without BSS, like binfmt_elf: zeroing would need a temporary
+	 * write bit on text, which MDWE (PR_SET_MDWE) refuses. */
+	seg->bss_partial_lo = (uintptr_t)(p_memsz > p_filesz ? end_file : fhi);
 	seg->bss_partial_hi = (uintptr_t)fhi;
 
 	/* Anonymous BSS extension: from fhi up to mhi.

@@ -44,6 +44,7 @@ This design + implementation note is split across:
 - [path-translation.md](path-translation.md) — translation rules, which syscalls need trapping, `execve`, `/proc/self/exe`, `/proc/<pid>/fd/<n>` and `getcwd` reverse translation, chroot emulation.
 - [link-emulation.md](link-emulation.md) — full hardlink emulation: the `distros/<id>/tawcroot/` link store format, locking/intent crash safety, O_TMPFILE publish, accepted deviations.
 - [seccomp-filter.md](seccomp-filter.md) — the seccomp filter and non-root filter installation.
+- [systemd.md](systemd.md) — `--init --cgroup`: systemd as pid 1 without namespaces, fake cgroup v2, mount/cap emulation.
 - [bootstrap-and-modules.md](bootstrap-and-modules.md) — bootstrap & entry, module layout.
 - [build-and-install.md](build-and-install.md) — build integration and installer integration.
 - [testing.md](testing.md) — testing strategy and layers.

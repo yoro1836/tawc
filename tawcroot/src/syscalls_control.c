@@ -22,7 +22,12 @@
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <sys/mount.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include "io.h"
 #include "path.h"
+#include "namespace.h"
+#include "path_scratch.h"
 
 #include "dispatch.h"
 #include "fastpath.h"
@@ -87,6 +92,8 @@ static long handle_prctl(const tawcroot_syscall_args *args, ucontext_t *uc)
 	(void)uc;
 	if ((int)args->a == PR_SET_SECCOMP)
 		return args->b == SECCOMP_MODE_FILTER && args->c ? accept_guest_filter(args->c) : TAWC_EINVAL;
+	long ns = tawcroot_namespace_prctl((int)args->a, args->b);
+	if (ns != TAWC_ENOSYS) return ns;
 	return TAWC_RAW(TAWC_SYS_prctl, args->a, args->b, args->c,
 			args->d, args->e, 0);
 }
@@ -336,13 +343,72 @@ static long handle_alarm(const tawcroot_syscall_args *args, ucontext_t *uc)
 }
 #endif
 
+/* Guest-absolute name of the directory guest `path` resolves to (magic
+ * links such as /proc/self/fd/N included), into `out` (4096 bytes). */
+static long guest_dir(const char *path, char *out)
+{
+	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+	char *name = scratch->buf[0], *suffix = scratch->buf[1];
+	long e = tawc_copy_string_from_guest(name, 4096, path);
+	if (e < 0) return e;
+	tawcroot_path_result r = tawcroot_path_translate(name, suffix, 4096,
+		TAWCROOT_PATH_FOLLOW, TAWCROOT_PATH_INTENT_READ);
+	if (r.err) return r.err;
+	long fd = tawc_openat(r.base_fd, *suffix ? suffix : ".",
+			      O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
+	if (fd < 0) return fd;
+	e = tawcroot_fd_to_guest_abs((int)fd, out, 4096);
+	tawc_close((int)fd);
+	return e < 0 ? e : 0;
+}
+
+/* API filesystems an init mounts at boot and the runtime already
+ * provides (as binds or real directories). */
+static int api_mount_point(const char *dir)
+{
+	static const char *const points[] = {
+		"/proc", "/sys", "/dev", "/dev/shm", "/dev/pts", "/run",
+		"/sys/fs/cgroup",
+	};
+	for (size_t i = 0; i < sizeof points / sizeof points[0]; i++)
+		if (tawc_streq(dir, points[i])) return 1;
+	return 0;
+}
+
 static long handle_mount(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
 	/* A bounded path-view operation, not a kernel mount or security boundary.
 	 * Recursive mounts, filesystem creation and propagation remain unsupported. */
-	if ((unsigned long)args->d != MS_BIND) return TAWC_EPERM;
-	return tawcroot_path_bind_guest((const char *)args->a, (const char *)args->b);
+	unsigned long flags = (unsigned long)args->d;
+	if (flags == MS_BIND)
+		return tawcroot_path_bind_guest((const char *)args->a, (const char *)args->b);
+	if (!(tawcroot_namespace.session & TAWC_NS_INIT_SESSION)) return TAWC_EPERM;
+	/* An --init session boots a real init, which mounts its API
+	 * filesystems over what the runtime already provides. Pretend for
+	 * those: new mounts there, remounts and propagation changes
+	 * anywhere succeed without touching the view. Everything
+	 * else stays EPERM so the init takes its unprivileged fallbacks. */
+	if (!(flags & ~(MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE | MS_REC)) &&
+	    (flags & (MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE)))
+		return 0;
+	if (flags & MS_MOVE || (flags & (MS_BIND | MS_REMOUNT)) == MS_BIND) return TAWC_EPERM;
+	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+	char *dir = scratch->buf[0];
+	long e = guest_dir((const char *)args->b, dir);
+	if (e < 0) return e;
+	return (flags & MS_REMOUNT) || api_mount_point(dir) ? 0 : TAWC_EPERM;
+}
+
+static long handle_umount(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	if (!(tawcroot_namespace.session & TAWC_NS_INIT_SESSION)) return TAWC_EPERM;
+	/* Nothing was ever really mounted, so nothing is a mount point.
+	 * Success here would spin "umount until EINVAL" loops forever. */
+	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+	long e = guest_dir((const char *)args->a, scratch->buf[0]);
+	return e == TAWC_ENOENT ? e : TAWC_EINVAL;
 }
 
 void tawcroot_control_register(void)
@@ -415,9 +481,10 @@ void tawcroot_control_register(void)
 	 *
 	 * chroot is NOT in this list — it has its own handler in chroot.c
 	 * that swaps the root-view bookkeeping. mount only accepts the bounded
-	 * process-local bind operation; all real mount operations stay denied. */
+	 * process-local bind operation; real mounts stay denied, except that an
+	 * --init session's mount/umount2 succeed as no-ops (handle_mount). */
 	tawcroot_dispatch_install(TAWC_SYS_pivot_root,      tawcroot_deny_eperm);
 	tawcroot_dispatch_install(TAWC_SYS_mount,           handle_mount);
-	tawcroot_dispatch_install(TAWC_SYS_umount2,         tawcroot_deny_eperm);
+	tawcroot_dispatch_install(TAWC_SYS_umount2,         handle_umount);
 	tawcroot_dispatch_install(TAWC_SYS_setns,           tawcroot_deny_eperm);
 }

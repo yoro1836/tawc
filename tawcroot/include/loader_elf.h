@@ -145,14 +145,10 @@ typedef struct {
  *                              ^=======^              <-- mmap anon RW
  *
  * `bss_partial_lo` and `bss_partial_hi` are always the half-open range
- * `[p_vaddr+p_filesz .. page_align_up(p_vaddr+p_filesz))`. Even when
- * `p_filesz == p_memsz` (no BSS), this range is non-empty whenever
- * `p_filesz` doesn't land on a page boundary — and the mapper will zero
- * those trailing bytes anyway. The kernel's mmap leaves them as
- * file-backed; for typical ELFs that's just zero-padding emitted by the
- * linker, but the spec doesn't promise it. The empty-slice case
- * (`bss_partial_lo == bss_partial_hi`) only happens when filesz lands on
- * a page boundary. `bss_anon_lo == bss_anon_hi` whenever
+ * `[p_vaddr+p_filesz .. page_align_up(p_vaddr+p_filesz))` when the
+ * segment has BSS (`p_memsz > p_filesz`), else empty: like binfmt_elf,
+ * a BSS-less tail stays file-backed, so text never needs a temporary
+ * write bit (MDWE refuses one). `bss_anon_lo == bss_anon_hi` whenever
  * `p_memsz` doesn't extend past the file-backed page. (Review B12.)
  */
 struct tawc_loader_seg {

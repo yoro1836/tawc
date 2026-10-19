@@ -137,6 +137,7 @@ PROD_C := \
     $(SRC_T)/src/sysv_shm.c \
     $(SRC_T)/src/proc_tcp.c \
     $(SRC_T)/src/namespace.c \
+    $(SRC_T)/src/cgroup.c \
     $(SRC_T)/src/main.c \
     $(SRC_T)/src/io.c \
     $(SRC_T)/src/strings.c \
@@ -316,6 +317,18 @@ $(OUT)/programs/static_argc_random: $(SRC_TS)/integration/programs/static_argc_r
 # static_namespace_check: static C (libc.a) — fake user/PID namespaces and
 # the lazily stacked write/getpid filter. See the source for exit codes.
 $(OUT)/programs/static_namespace_check: $(SRC_TS)/integration/programs/static_namespace_check.c | $(OUT)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -static -Wl,--build-id=none $< -o $@
+
+# static_init_check: static C (libc.a) — `--init` fake pid 1, orphan
+# adoption and init signal semantics. See the source for exit codes.
+$(OUT)/programs/static_init_check: $(SRC_TS)/integration/programs/static_init_check.c | $(OUT)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -static -Wl,--build-id=none $< -o $@
+
+# static_cgroup_check: static C (libc.a) — `--init --cgroup` fake cgroup v2
+# tree and init-session mount/umount. See the source for exit codes.
+$(OUT)/programs/static_cgroup_check: $(SRC_TS)/integration/programs/static_cgroup_check.c | $(OUT)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -static -Wl,--build-id=none $< -o $@
 
