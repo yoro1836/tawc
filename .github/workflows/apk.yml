@@ -1,0 +1,84 @@
+name: apk
+
+# Debug APK (me.phie.tawc.dev, arm64-v8a) in the same configuration as
+# the F-Droid recipe: tawcroot only, libhybris + cpu graphics. Built in
+# Debian trixie with the host packages from notes/building.md.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    timeout-minutes: 300
+    env:
+      ANDROID_HOME: /opt/android-sdk
+      JAVA_HOME: /usr/lib/jvm/java-21-openjdk-amd64
+      NDK_VERSION: 27.2.12479018
+      CMDLINE_TOOLS: commandlinetools-linux-11076708_latest.zip
+    steps:
+      - name: Host packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git unzip \
+            openjdk-21-jdk-headless rustup build-essential make pkg-config curl \
+            libarchive-tools file meson ninja-build bison autoconf automake libtool \
+            libtool-bin libltdl-dev perl python3 python3-libxml2 xsltproc libexpat1-dev \
+            libwayland-dev libwayland-bin libwayland-egl-backend-dev wayland-protocols \
+            libvulkan-dev patchelf libx11-dev libx11-xcb-dev libxcb1-dev \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu libc6-arm64-cross linux-libc-dev-arm64-cross
+          git config --global --add safe.directory '*'
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.cargo/registry
+            ~/.cargo/bin
+            ~/.rustup
+            /opt/android-sdk
+            build
+            app/src/main/assets/libhybris
+            app/src/main/assets/xwayland
+          key: apk-${{ hashFiles('deps/deps.list', 'rust-toolchain.toml', 'gradle/wrapper/gradle-wrapper.properties') }}-${{ github.sha }}
+          restore-keys: |
+            apk-${{ hashFiles('deps/deps.list', 'rust-toolchain.toml', 'gradle/wrapper/gradle-wrapper.properties') }}-
+            apk-
+      - name: Android SDK
+        run: |
+          if [ ! -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            curl -fsSLo /tmp/tools.zip "https://dl.google.com/android/repository/$CMDLINE_TOOLS"
+            mkdir -p "$ANDROID_HOME/cmdline-tools"
+            unzip -q /tmp/tools.zip -d "$ANDROID_HOME/cmdline-tools"
+            mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          fi
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "ndk;$NDK_VERSION" >/dev/null
+      - name: Rust
+        run: |
+          # Debian's rustup keeps its proxies (cargo, rustc) here.
+          export PATH="/usr/lib/rustup/bin:$HOME/.cargo/bin:$PATH"
+          echo "/usr/lib/rustup/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          targets=$(sed -n '/^targets/,/]/p' rust-toolchain.toml | grep -o '"[^"]*"' | tr -d '"' | paste -sd,)
+          rustup toolchain install "$channel" --profile minimal --target "$targets"
+          command -v cargo-ndk >/dev/null || cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Build APK
+        run: |
+          printf 'tawcMethods=tawcroot\n' >> gradle.properties
+          scripts/build-app.sh --abi=arm64-v8a --graphics=libhybris,cpu
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tawc-dev-arm64-v8a
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

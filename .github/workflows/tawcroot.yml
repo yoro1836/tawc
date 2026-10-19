@@ -38,3 +38,8 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
       - name: Build tawcroot
         run: tawcroot/build.sh --abi=${{ matrix.abi }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tawcroot-${{ matrix.abi }}
+          path: build/tawcroot-${{ matrix.abi }}/libtawcroot.so
+          if-no-files-found: error

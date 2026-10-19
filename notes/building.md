@@ -13,7 +13,10 @@ untested.
 The standalone host runtime tests require GCC 14 or newer (C23) and GNU
 binutils. On Ubuntu 24.04 install `gcc-14`, then run
 `CC=gcc-14 tawcroot/test.sh --host`. CI (`.github/workflows/tawcroot.yml`)
-runs that on ubuntu-24.04 and builds both Android ABIs with the pinned NDK.
+runs that on ubuntu-24.04 and builds both Android ABIs with the pinned NDK,
+uploading `libtawcroot.so` per ABI. `.github/workflows/apk.yml` builds the
+debug APK (arm64-v8a, F-Droid recipe configuration) in Debian trixie with
+the package set below and uploads it as an artifact.
 Host runtime binaries use GNU ld's
 `-Ttext-segment` and GCC's trap-only UBSan option. Android production builds
 continue to use the NDK toolchain; ARLinux also builds that standalone runtime
