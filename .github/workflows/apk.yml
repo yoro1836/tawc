@@ -76,9 +76,16 @@ jobs:
       - name: Build APK
         run: |
           # Fixed debug key, so each artifact installs over the last.
-          mkdir -p ~/.android && cp .github/debug.keystore ~/.android/debug.keystore
+          # In the container $HOME is /github/home but Java's user.home
+          # is /root, so point AGP at the key explicitly.
+          export ANDROID_USER_HOME="$PWD/build/android-user-home"
+          mkdir -p "$ANDROID_USER_HOME"
+          cp .github/debug.keystore "$ANDROID_USER_HOME/debug.keystore"
           printf 'tawcMethods=tawcroot\n' >> gradle.properties
           scripts/build-app.sh --abi=arm64-v8a --graphics=libhybris,cpu
+          # Must stay the same from run to run.
+          signer=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | tail -1)
+          "$signer" verify --print-certs app/build/outputs/apk/debug/*.apk | grep SHA-256
       - uses: actions/upload-artifact@v4
         with:
           name: tawc-dev-arm64-v8a
