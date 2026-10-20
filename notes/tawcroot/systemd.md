@@ -58,7 +58,7 @@ generation moves, so there is no per-process mount namespace.
 A `CLONE_VM` child (vfork, `posix_spawn`) shares its parent's bind
 table but not its fds, so it never mirrors; it routes through the
 parent's view until its exec builds its own.
-- `tmpfs`/`ramfs`/`mqueue` mount a fresh backing dir `<store>/mnt/<id>`
+- `tmpfs`/`ramfs`/`mqueue`/`fusectl` mount a fresh backing dir `<store>/mnt/<id>`
   (`mode=` applies) over the target; `statfs` reports the fs magic.
   A missing target under an existing parent works (`/dev/mqueue` in a
   host-bound `/dev`).

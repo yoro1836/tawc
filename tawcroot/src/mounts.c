@@ -402,9 +402,11 @@ static long do_mount(const char *gsource, const char *gtarget, const char *gtype
         if (tawc_streq(abs, api[k])) return 0;
     char type[32], source[64];
     if (!gtype || tawc_copy_string_from_guest(type, sizeof type, gtype) < 0) return TAWC_EFAULT;
-    /* An empty directory is a faithful tmpfs/ramfs, and enough of an
-     * mqueue (mq_open does not go through the filesystem). */
-    if (!tawc_streq(type, "tmpfs") && !tawc_streq(type, "ramfs") && !tawc_streq(type, "mqueue"))
+    /* An empty directory is a faithful tmpfs/ramfs, enough of an
+     * mqueue (mq_open does not go through the filesystem), and a
+     * fusectl with no FUSE connections (guests can't mount FUSE). */
+    if (!tawc_streq(type, "tmpfs") && !tawc_streq(type, "ramfs") &&
+        !tawc_streq(type, "mqueue") && !tawc_streq(type, "fusectl"))
         return missing ? TAWC_ENOENT : TAWC_EPERM;
     if (!gsource || tawc_copy_string_from_guest(source, sizeof source, gsource) < 0)
         (void)tawc_str_copy(source, sizeof source, type);
