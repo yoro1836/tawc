@@ -18,6 +18,9 @@ void tawcroot_fs_register(void);
  * fds, which RO binds never grant). */
 tawcroot_path_intent tawcroot_openat_intent(int flags);
 
+/* Device of the host procfs (syscalls_fd.c), or 0 if unknown. */
+unsigned long tawcroot_proc_dev(void);
+
 struct statx;
 
 /* STATX_MNT_ID emulation for pre-5.8 kernels (see syscalls_fs.c for

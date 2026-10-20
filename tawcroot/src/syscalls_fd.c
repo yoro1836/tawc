@@ -390,7 +390,7 @@ static long handle_fcntl(const tawcroot_syscall_args *args, ucontext_t *uc)
 /* Device of the host procfs, which every /proc view (bind or guest
  * mount of the same instance) shares. Racing first calls compute the
  * same value. */
-static unsigned long proc_dev(void)
+unsigned long tawcroot_proc_dev(void)
 {
 	static unsigned long dev;
 	unsigned long d = __atomic_load_n(&dev, __ATOMIC_RELAXED);
@@ -461,7 +461,7 @@ static long handle_getdents64(const tawcroot_syscall_args *args,
 	struct stat dst;
 	if (TAWC_RAW(TAWC_SYS_fstat, fd, (long)&dst, 0, 0, 0, 0) != 0)
 		return n;
-	unsigned long pdev = proc_dev();
+	unsigned long pdev = tawcroot_proc_dev();
 	if (pdev && (unsigned long)dst.st_dev != pdev) {
 		if (tawcroot_store_link_fd >= 0 && tawcroot_store_dev &&
 		    (unsigned long)dst.st_dev == tawcroot_store_dev)

@@ -36,7 +36,9 @@ subreaper. On top of that, in an init session:
 - Pid isolation: signals and `/proc` listings only reach the init and
   its descendants ([seccomp-filter.md](seccomp-filter.md)). A guest
   `kill(-1)` no longer reaches app processes. The listing names the
-  init `1` and hides the `--console` relay (a child of the init). Other
+  init `1` and hides the `--console` relay (a child of the init).
+  Opens relative to a `/proc` fd (procps: `openat(proc, "1/stat")`)
+  are made absolute first so the same rewrites apply. Other
   guest processes keep their real pids.
 - `unshare` returns `EPERM`, which systemd reads as "containerized" and
   skips service sandboxing.

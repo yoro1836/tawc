@@ -262,6 +262,26 @@ static long open_emulated_leaf(int dirfd, const char *path, int flags,
 			   flags & ~(O_CREAT | O_EXCL), mode);
 }
 
+/* In an init session, a path relative to a procfs `dirfd` becomes
+ * absolute in place so /proc/1 and the stat/status rewrites apply
+ * (procps opens "<pid>/stat" against a /proc fd). Returns 1 if done. */
+static int proc_relative_to_abs(int dirfd, char *path, char *tmp)
+{
+	if (!tawcroot_namespace.init_pid || dirfd == AT_FDCWD ||
+	    path[0] == '/' || !path[0])
+		return 0;
+	struct stat st;
+	unsigned long pdev = tawcroot_proc_dev();
+	if (!pdev || TAWC_RAW(TAWC_SYS_fstat, dirfd, (long)&st, 0, 0, 0, 0) != 0 ||
+	    (unsigned long)st.st_dev != pdev)
+		return 0;
+	long n = tawcroot_compose_fd_relative(dirfd, path, tmp,
+					      TAWCROOT_PATH_SCRATCH_SIZE);
+	if (n <= 0 || !tawc_starts_with(tmp, "/proc")) return 0;
+	memcpy(path, tmp, (size_t)n + 1);
+	return 1;
+}
+
 static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
@@ -274,6 +294,7 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	char *path = scratch->buf[0];
 	long fe = fetch_guest_path(scratch, 0, gpath);
 	if (fe) return fe;
+	if (proc_relative_to_abs(dirfd, path, scratch->buf[1])) dirfd = AT_FDCWD;
 	long gamepad = tawcroot_gamepad_open(dirfd, path, flags);
 	if (gamepad != TAWC_ENOSYS) return gamepad;
 	long nsfd = tawcroot_namespace_open(path, flags);

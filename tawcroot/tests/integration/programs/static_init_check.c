@@ -3,7 +3,8 @@
  * init only receives signals it has a handler for, as a real namespace
  * init does. With a host pid as argv[1], also checks that the guest
  * can neither see nor signal it, kill(-1) included. With "solo", checks
- * that /proc lists the init as 1 and nothing else (no --console relay).
+ * that /proc lists the init as 1 and nothing else (no --console relay),
+ * and that "1/stat" opened against a /proc fd says so too (procps).
  *
  * Exit 42 on success; every other code names the failed step. pids go
  * through raw syscalls so libc caching can't hide the translation. */
@@ -11,6 +12,7 @@
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -78,6 +80,20 @@ static int others_listed(void)
 	return init ? others : -1;
 }
 
+/* openat(/proc fd, "1/stat") starts "1 (". */
+static int relative_stat(void)
+{
+	int d = open("/proc", O_RDONLY | O_DIRECTORY);
+	if (d < 0) return 1;
+	int f = openat(d, "1/stat", O_RDONLY);
+	close(d);
+	if (f < 0) return 2;
+	char buf[8] = { 0 };
+	int ok = read(f, buf, 3) == 3 && !memcmp(buf, "1 (", 3);
+	close(f);
+	return ok ? 0 : 3;
+}
+
 /* The host process `host` stays out of reach; kill(-1) still reaches
  * the guest's own processes. */
 static int isolation(long host)
@@ -136,7 +152,7 @@ int main(int argc, char **argv)
 	for (int i = 0; i < 500 && !got_usr1; i++) usleep(10000);
 	if (!got_usr1) return 30;
 	if (argc > 1 && !strcmp(argv[1], "solo"))
-		return others_listed() == 0 ? 42 : 50;
+		return others_listed() != 0 ? 50 : relative_stat() ? 50 + relative_stat() : 42;
 	if (argc > 1) {
 		int e = isolation(atol(argv[1]));
 		if (e) return 40 + e;
