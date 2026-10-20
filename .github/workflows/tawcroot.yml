@@ -60,7 +60,7 @@ jobs:
       - name: Debian sid rootfs
         run: |
           docker run --name sid debian:sid sh -c \
-            'apt-get update && apt-get install -y --no-install-recommends systemd systemd-sysv dbus'
+            'apt-get update && apt-get install -y --no-install-recommends systemd systemd-sysv dbus procps'
           mkdir -p build/sid/rootfs
           docker export sid | tar -x -C build/sid/rootfs --no-same-owner --exclude=dev/* 2>/dev/null || true
       - name: Boot systemd

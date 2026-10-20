@@ -30,6 +30,11 @@ if kill -0 $P 2>/dev/null; then
     echo "== failed units"
     # shellcheck disable=SC2086
     "$T" $B --join -- /usr/bin/systemctl --no-pager --failed 2>&1
+    echo "== ps"
+    # shellcheck disable=SC2086
+    ps=$("$T" $B --join -- /usr/bin/ps -A 2>&1)
+    echo "$ps"
+    echo "$ps" | grep -q '^ *1 .*systemd$' || state="pid1-missing:$state"
     kill -9 $P
 else
     wait $P
