@@ -35,7 +35,9 @@ subreaper. On top of that, in an init session:
   die with the init instead of outliving it.
 - Pid isolation: signals and `/proc` listings only reach the init and
   its descendants ([seccomp-filter.md](seccomp-filter.md)). A guest
-  `kill(-1)` no longer reaches app processes.
+  `kill(-1)` no longer reaches app processes. The listing names the
+  init `1` and hides the `--console` relay (a child of the init). Other
+  guest processes keep their real pids.
 - `unshare` returns `EPERM`, which systemd reads as "containerized" and
   skips service sandboxing.
 - systemd 262 also needs `pidfd_open` (it takes a pidfd on itself in

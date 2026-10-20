@@ -95,7 +95,8 @@ extern "C" {
 /* v9: pinned executable descriptor survives the internal re-exec. */
 /* v10: transport the complete runtime bind table instead of truncating at 16. */
 /* v11: namespace session flags (`--init`). */
-#define TAWCROOT_EXEC_STATE_VERSION 11
+/* v12: --console relay pid (namespace helper_pid). */
+#define TAWCROOT_EXEC_STATE_VERSION 12
 /* MAX_ARGS at 4096: shell glob expansions, linker invocations, and
  * pacman hooks routinely pass hundreds-to-thousands of args; the kernel
  * allows ~2 MB of argv strings. MAX_ENV at 1024 covers the busiest bash

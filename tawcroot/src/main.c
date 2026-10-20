@@ -491,16 +491,27 @@ static const char *console_pty(const char *file)
 	if (pid == 0) {
 		char buf[512];
 		for (;;) {
-			long r = tawc_read((int)m, buf, sizeof buf);
-			if (r > 0) { (void)tawc_write((int)out, buf, (size_t)r); continue; }
-			/* EIO: no slave open right now. */
+			/* Wake at least every second to notice the init is gone,
+			 * even if no slave was ever opened (read would block). */
+			struct { int fd; short events, revents; } p = { (int)m, 1 /* POLLIN */, 0 };
+			struct { long s, ns; } ts = { 1, 0 };
+			(void)TAWC_RAW(__NR_ppoll, (long)&p, 1, (long)&ts, 0, 8, 0);
+			if (p.revents & 1) {
+				long r = tawc_read((int)m, buf, sizeof buf);
+				if (r > 0) { (void)tawc_write((int)out, buf, (size_t)r); continue; }
+			}
 			if (TAWC_RAW(TAWC_SYS_getppid, 0, 0, 0, 0, 0, 0) != parent) tawc_exit_group(0);
-			struct { long s, ns; } ts = { 0, 100000000 };
-			(void)TAWC_RAW(__NR_nanosleep, (long)&ts, 0, 0, 0, 0, 0);
+			/* POLLHUP: no slave open right now. */
+			if (p.revents) {
+				ts.s = 0;
+				ts.ns = 100000000;
+				(void)TAWC_RAW(__NR_nanosleep, (long)&ts, 0, 0, 0, 0, 0);
+			}
 		}
 	}
 	tawc_close((int)m);
 	tawc_close((int)out);
+	if (pid > 0) tawcroot_namespace.helper_pid = (int32_t)pid;
 	return pid < 0 ? 0 : spec;
 }
 

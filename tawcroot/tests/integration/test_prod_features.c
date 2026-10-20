@@ -680,6 +680,21 @@ test(prod_init_pid_isolation)
 	rh_rmrf(FAKE_ROOTFS);
 }
 
+/* /proc lists the init as 1 and hides the --console relay. */
+test(prod_init_proc_listing)
+{
+	rh_rmrf(FAKE_ROOTFS);
+	test_true(build_rootfs());
+	char log[512];
+	snprintf(log, sizeof log, "%s/console.log", FAKE_ROOTFS);
+	const char *args[] = {
+		"-r", FAKE_ROOTFS, "-b", "/proc:/proc", "--console", log,
+		"--init", "--", "/bin/static_init_check", "solo", NULL
+	};
+	test_int_eq(run_with(args), 42);
+	rh_rmrf(FAKE_ROOTFS);
+}
+
 test(prod_init_mounts)
 {
 	rh_rmrf(FAKE_ROOTFS);

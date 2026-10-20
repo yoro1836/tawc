@@ -636,6 +636,7 @@ int tawcroot_namespace_is_guest(long pid)
 {
     long init = tawcroot_namespace.init_pid;
     if (!init) return 1;
+    if (pid == tawcroot_namespace.helper_pid) return 0;
     for (int depth = 0; depth < 128 && pid > 1; ++depth) {
         if (pid == init || joined(pid)) return 1;
         long ppid, pgrp;
@@ -808,7 +809,7 @@ static void reset_dir(const char *dir)
 }
 
 /* `<store>/init`: who the session's init is, for `--join`. */
-struct init_rec { uint64_t start; int32_t pid; uint32_t session; };
+struct init_rec { uint64_t start; int32_t pid; uint32_t session; int32_t helper; uint32_t pad; };
 
 void tawcroot_namespace_session_setup(void)
 {
@@ -817,7 +818,8 @@ void tawcroot_namespace_session_setup(void)
     char path[512];
     long ppid;
     struct init_rec r = { 0, tawcroot_namespace.init_pid,
-                          tawcroot_namespace.session & (TAWC_NS_INIT_SESSION | TAWC_NS_CGROUP) };
+                          tawcroot_namespace.session & (TAWC_NS_INIT_SESSION | TAWC_NS_CGROUP),
+                          tawcroot_namespace.helper_pid, 0 };
     if (ids_path(path, sizeof path, "/init", 0) || stat_start(r.pid, &r.start, &ppid)) return;
     long fd = tawc_openat(AT_FDCWD, path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (fd < 0) return;
@@ -841,6 +843,7 @@ long tawcroot_namespace_join(void)
     e = tawcroot_install_lazy_filter(pid_lazy, sizeof pid_lazy / sizeof pid_lazy[0]);
     if (e) return e;
     tawcroot_namespace.init_pid = r.pid;
+    tawcroot_namespace.helper_pid = r.helper;
     e = enter_session();
     if (!e && (r.session & TAWC_NS_CGROUP)) e = tawcroot_cgroup_join();
     if (e) return e;

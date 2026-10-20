@@ -2,7 +2,8 @@
  * getpid/getppid on both sides, orphan adoption (subreaper), and that
  * init only receives signals it has a handler for, as a real namespace
  * init does. With a host pid as argv[1], also checks that the guest
- * can neither see nor signal it, kill(-1) included.
+ * can neither see nor signal it, kill(-1) included. With "solo", checks
+ * that /proc lists the init as 1 and nothing else (no --console relay).
  *
  * Exit 42 on success; every other code names the failed step. pids go
  * through raw syscalls so libc caching can't hide the translation. */
@@ -12,6 +13,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -61,6 +63,21 @@ static int listed(long pid)
 	return found;
 }
 
+/* Numeric /proc entries other than "1", or -1 when "1" is missing. */
+static int others_listed(void)
+{
+	DIR *d = opendir("/proc");
+	if (!d) return -1;
+	int others = 0, init = 0;
+	for (struct dirent *e; (e = readdir(d));) {
+		if (strspn(e->d_name, "0123456789") != strlen(e->d_name)) continue;
+		if (!strcmp(e->d_name, "1")) init = 1;
+		else others++;
+	}
+	closedir(d);
+	return init ? others : -1;
+}
+
 /* The host process `host` stays out of reach; kill(-1) still reaches
  * the guest's own processes. */
 static int isolation(long host)
@@ -69,6 +86,7 @@ static int isolation(long host)
 	if (syscall(SYS_pidfd_open, host, 0) >= 0 || errno != ESRCH) return 2;
 	if (syscall(SYS_tgkill, host, host, 0) == 0 || errno != ESRCH) return 3;
 	if (listed(host) != 0) return 4;
+	if (listed(1) != 1) return 9;
 
 	pid_t c = fork();
 	if (c < 0) return 5;
@@ -117,6 +135,8 @@ int main(int argc, char **argv)
 	if (r != 0) return 20 + r;
 	for (int i = 0; i < 500 && !got_usr1; i++) usleep(10000);
 	if (!got_usr1) return 30;
+	if (argc > 1 && !strcmp(argv[1], "solo"))
+		return others_listed() == 0 ? 42 : 50;
 	if (argc > 1) {
 		int e = isolation(atol(argv[1]));
 		if (e) return 40 + e;

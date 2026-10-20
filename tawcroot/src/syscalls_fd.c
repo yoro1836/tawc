@@ -405,7 +405,8 @@ static unsigned long proc_dev(void)
 }
 
 /* Drop /proc/<pid> entries of processes outside the fake pid
- * namespace from a linux_dirent64 buffer. Returns the kept length. */
+ * namespace from a linux_dirent64 buffer and list the init as "1".
+ * Returns the kept length. */
 static long hide_host_pids(char *buf, long n)
 {
 	long out = 0;
@@ -418,6 +419,10 @@ static long hide_host_pids(char *buf, long n)
 		const char *c = name;
 		for (; *c >= '0' && *c <= '9'; ++c) pid = pid * 10 + (*c - '0');
 		int keep = *c || !pid || tawcroot_namespace_is_guest(pid);
+		if (keep && !*c && pid == tawcroot_namespace.init_pid) {
+			buf[off + 19] = '1';
+			buf[off + 20] = 0;
+		}
 		if (keep) {
 			if (out != off) memmove(buf + out, buf + off, reclen);
 			out += reclen;

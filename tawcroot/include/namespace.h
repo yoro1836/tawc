@@ -8,6 +8,7 @@ struct tawc_namespace {
     int32_t maps[3];
     uint32_t session;  /* TAWC_NS_* flags */
     uint32_t capbset_dropped[2];  /* --init: emulated bounding set */
+    int32_t helper_pid;  /* --console relay, hidden from the guest */
 };
 #define TAWC_NS_INIT_SESSION 1u
 #define TAWC_NS_CGROUP 2u        /* --cgroup: fake cgroupfs (cgroup.h) */
