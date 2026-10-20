@@ -165,6 +165,15 @@ it exits 255 silently on a fatal boot error otherwise). tawcroot's own
 errors and the init's exit status land there too. Turning the setting off sends SIGRTMIN+4 (poweroff). Not
 yet run on a device.
 
+## Debugging on a device
+- Init sessions append guest SIGSEGV/SIGBUS details (pc, return address
+  and their `/proc/self/maps` lines) to `<store>/fault.log`.
+- If `<store>/eacces.log` exists, every trapped syscall failing with
+  EACCES/EPERM appends `pid nr errno path` to it.
+- `<store>` is `<rootfs parent>/tawcroot`. A phone test script that runs
+  both over adb or rish lives in the project files
+  (`tawcroot/phone-systemd-test.sh`).
+
 ## Known boot failures
 
 Debian trixie's systemd 257 and sid's 262 boot to `graphical.target`

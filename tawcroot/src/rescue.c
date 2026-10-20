@@ -37,6 +37,9 @@
 #include "rescue.h"
 #include "sysnr.h"
 #include "tawc_uapi.h"
+#include "io.h"
+#include "linkstore.h"
+#include "usercopy.h"
 
 /* Concurrently-trapping threads that can be rescued at once. Beyond
  * this the rescue silently switches off (the guest sees the original
@@ -343,7 +346,40 @@ long tawcroot_rescue_open_in_view(const char *guest_path)
 	return rv;
 }
 
-long tawcroot_dispatch_call(const tawcroot_syscall_args *args, ucontext_t *uc)
+/* Debug surface: if <store>/eacces.log exists, trapped syscalls failing
+ * with EACCES/EPERM append "pid nr rv path" to it. The file is only
+ * looked up on such failures, and once per process if it is missing. */
+static int g_eacces_log;   /* 0 unknown, -1 absent */
+
+static void note_eacces(const tawcroot_syscall_args *a, long rv)
+{
+	if (g_eacces_log < 0 || !tawcroot_store_host_path_len) return;
+	char buf[512];
+	size_t n = 0;
+	if (tawc_str_append(buf, sizeof buf, &n, tawcroot_store_host_path) ||
+	    tawc_str_append(buf, sizeof buf, &n, "/eacces.log")) return;
+	long fd = tawc_openat(AT_FDCWD, buf, O_WRONLY | O_APPEND | O_CLOEXEC, 0);
+	if (fd < 0) { g_eacces_log = -1; return; }
+	char path[200];
+	const char *arg = (const char *)(uintptr_t)a->b;
+	if ((uintptr_t)arg < 4096 || tawc_copy_string_from_guest(path, sizeof path, arg) < 0) {
+		arg = (const char *)(uintptr_t)a->a;
+		if ((uintptr_t)arg < 4096 || tawc_copy_string_from_guest(path, sizeof path, arg) < 0)
+			path[0] = 0;
+	}
+	for (char *c = path; *c; ++c) if (*c < 32 || *c > 126) { *c = 0; break; }
+	n = 0;
+	(void)tawc_str_append_dec(buf, sizeof buf, &n, TAWC_RAW(TAWC_SYS_getpid, 0, 0, 0, 0, 0, 0));
+	(void)tawc_str_append(buf, sizeof buf, &n, " nr ");
+	(void)tawc_str_append_dec(buf, sizeof buf, &n, a->nr);
+	(void)tawc_str_append(buf, sizeof buf, &n, rv == TAWC_EACCES ? " EACCES " : " EPERM ");
+	(void)tawc_str_append(buf, sizeof buf, &n, path);
+	(void)tawc_str_append(buf, sizeof buf, &n, "\n");
+	(void)TAWC_RAW(TAWC_SYS_write, fd, (long)buf, (long)n, 0, 0, 0);
+	tawc_close((int)fd);
+}
+
+static long dispatch_call(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	tawcroot_handler_fn fn = tawcroot_dispatch_get((int)args->nr);
 	if (!fn) return TAWC_ENOSYS;
@@ -365,5 +401,12 @@ long tawcroot_dispatch_call(const tawcroot_syscall_args *args, ucontext_t *uc)
 	if (rv == TAWC_EACCES)
 		rv = rescue_retry(&g_slots[idx], args, fn, uc, rv);
 	slot_release(idx);
+	return rv;
+}
+
+long tawcroot_dispatch_call(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	long rv = dispatch_call(args, uc);
+	if (rv == TAWC_EACCES || rv == TAWC_EPERM) note_eacces(args, rv);
 	return rv;
 }
