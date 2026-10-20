@@ -20,7 +20,10 @@ rootfs from the `debian:sid` Docker image). `.github/workflows/apk.yml` builds t
 debug APK (arm64-v8a, F-Droid recipe configuration) in Debian trixie with
 the package set below and uploads it as an artifact, signed with the
 committed debug key `.github/debug.keystore` (password `android`) so
-artifacts update in place.
+artifacts update in place. It caches toolchains (`GRADLE_USER_HOME` is pinned to
+`/github/home/.gradle`, since Java's `user.home` there is `/root`) and,
+separately, dep checkouts, `compositor/target` and Gradle task history,
+so unchanged deps stay UP-TO-DATE between runs.
 Host runtime binaries use GNU ld's
 `-Ttext-segment` and GCC's trap-only UBSan option. Android production builds
 continue to use the NDK toolchain; ARLinux also builds that standalone runtime
