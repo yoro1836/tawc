@@ -38,6 +38,7 @@
 #define TAWC_EISDIR        (-21)
 #define TAWC_EINVAL        (-22)
 #define TAWC_EMFILE        (-24)
+#define TAWC_ENOTTY        (-25)
 #define TAWC_ENOSPC        (-28)
 #define TAWC_EROFS         (-30)
 #define TAWC_ERANGE        (-34)

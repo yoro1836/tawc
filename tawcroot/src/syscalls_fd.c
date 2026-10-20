@@ -746,8 +746,16 @@ static long handle_ioctl(const tawcroot_syscall_args *args, ucontext_t *uc)
 			return handle_tcgets2_fallback(fd, arg);
 		return handle_tcsets2_fallback(fd, cmd, arg);
 	}
-	return TAWC_RAW(TAWC_SYS_ioctl, fd, args->b, arg,
-	                args->d, args->e, args->f);
+	long rv = TAWC_RAW(TAWC_SYS_ioctl, fd, args->b, arg,
+	                   args->d, args->e, args->f);
+	/* Android's xperm policy denies apps the file-attribute ioctls
+	 * (FS_IOC_GETFLAGS 'f', FS_IOC_FSGETXATTR 'X') on their own files.
+	 * Report them unsupported: systemd treats EACCES from its
+	 * StateDirectory= quota probe as fatal but ENOTTY as "no quotas". */
+	unsigned int type = (cmd >> 8) & 0xff;
+	if (rv == TAWC_EACCES && (type == 'f' || type == 'X'))
+		return TAWC_ENOTTY;
+	return rv;
 }
 
 void tawcroot_fd_register(void)
