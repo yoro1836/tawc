@@ -366,13 +366,12 @@ static long become_init(void)
     return 0;
 }
 
-long tawcroot_namespace_init_session(void)
+static long enter_session(void)
 {
-    long r = become_init();
-    if (r) return r;
     /* A real init starts with every capability; services drop from
      * there. Emulated like a user namespace's (namespace_cap). */
     struct tawc_namespace *ns = &tawcroot_namespace;
+    long r;
     static const int init_lazy[] = { TAWC_SYS_fstatfs, TAWC_SYS_uname, __NR_sethostname, __NR_setdomainname };
     r = tawcroot_install_lazy_filter(init_lazy, sizeof init_lazy / sizeof init_lazy[0]);
     if (r) return r;
@@ -387,6 +386,12 @@ long tawcroot_namespace_init_session(void)
         ns->capbset_dropped[1] = ~0u;
     }
     return 0;
+}
+
+long tawcroot_namespace_init_session(void)
+{
+    long r = become_init();
+    return r ? r : enter_session();
 }
 
 /* No pid namespace tears init's children down with it, so its direct
@@ -606,14 +611,34 @@ static long stat_ids(long pid, long *ppid, long *pgrp)
     return 0;
 }
 
+static long ids_path(char *out, size_t cap, const char *dir, long pid);
+static long stat_start(long pid, uint64_t *start, long *ppid);
+
+/* Root of a `--join`ed process tree: `<store>/joined/<pid>` holds its
+ * start time, so a recycled pid doesn't count. */
+static int joined(long pid)
+{
+    char path[512];
+    uint64_t rec, start;
+    long ppid;
+    if (ids_path(path, sizeof path, "/joined", pid)) return 0;
+    long fd = tawc_openat(AT_FDCWD, path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW, 0);
+    if (fd < 0) return 0;
+    long n = tawc_read((int)fd, &rec, sizeof rec);
+    tawc_close((int)fd);
+    return n == sizeof rec && !stat_start(pid, &start, &ppid) && start == rec;
+}
+
 /* The init or one of its descendants. Orphans reparent to the init (a
- * subreaper), so every guest process keeps a parent chain to it. */
+ * subreaper), so every guest process keeps a parent chain to it; a
+ * `--join`ed tree counts from its root. */
 int tawcroot_namespace_is_guest(long pid)
 {
     long init = tawcroot_namespace.init_pid;
     if (!init) return 1;
+    if (pid == tawcroot_namespace.helper_pid) return 0;
     for (int depth = 0; depth < 128 && pid > 1; ++depth) {
-        if (pid == init) return 1;
+        if (pid == init || joined(pid)) return 1;
         long ppid, pgrp;
         if (stat_ids(pid, &ppid, &pgrp)) return 0;
         pid = ppid;
@@ -686,7 +711,7 @@ static long namespace_signal(const tawcroot_syscall_args *a, ucontext_t *uc)
 {
     (void)uc;
     long init = tawcroot_namespace.init_pid;
-    long pid = a->a, tid = a->b;
+    long pid = (int)a->a, tid = (int)a->b;   /* pid_t: upper bits are junk */
     if (init && pid == 1) pid = init;
     if (init && tid == 1 && (a->nr == __NR_tgkill || a->nr == __NR_rt_tgsigqueueinfo)) tid = init;
     if (!init) return TAWC_RAW(a->nr, a->a, a->b, a->c, a->d, 0, 0);
@@ -731,12 +756,13 @@ static long namespace_signal(const tawcroot_syscall_args *a, ucontext_t *uc)
 
 struct ids_rec { uint64_t start; uint32_t uid, gid; };
 
-static long ids_path(char *out, size_t cap, long pid)
+/* <store><dir>[/<pid>] */
+static long ids_path(char *out, size_t cap, const char *dir, long pid)
 {
     size_t n = 0;
     if (!tawcroot_store_host_path_len ||
         tawc_str_append(out, cap, &n, tawcroot_store_host_path) ||
-        tawc_str_append(out, cap, &n, "/ids") ||
+        tawc_str_append(out, cap, &n, dir) ||
         (pid && (tawc_str_append(out, cap, &n, "/") ||
                  tawc_str_append_dec(out, cap, &n, pid))))
         return TAWC_ENAMETOOLONG;
@@ -771,15 +797,66 @@ static long stat_start(long pid, uint64_t *start, long *ppid)
     return TAWC_ESRCH;
 }
 
-void tawcroot_namespace_ids_setup(void)
+static void reset_dir(const char *dir)
 {
     char path[512];
-    if (ids_path(path, sizeof path, 0)) return;
+    if (ids_path(path, sizeof path, dir, 0)) return;
     (void)TAWC_RAW(TAWC_SYS_mkdirat, AT_FDCWD, (long)path, 0700, 0, 0, 0);
-    long dir = tawc_openat(AT_FDCWD, path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW, 0);
-    if (dir < 0) return;
-    tawcroot_wipe_dir((int)dir);
-    tawc_close((int)dir);
+    long fd = tawc_openat(AT_FDCWD, path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW, 0);
+    if (fd < 0) return;
+    tawcroot_wipe_dir((int)fd);
+    tawc_close((int)fd);
+}
+
+/* `<store>/init`: who the session's init is, for `--join`. */
+struct init_rec { uint64_t start; int32_t pid; uint32_t session; int32_t helper; uint32_t pad; };
+
+void tawcroot_namespace_session_setup(void)
+{
+    reset_dir("/ids");
+    reset_dir("/joined");
+    char path[512];
+    long ppid;
+    struct init_rec r = { 0, tawcroot_namespace.init_pid,
+                          tawcroot_namespace.session & (TAWC_NS_INIT_SESSION | TAWC_NS_CGROUP),
+                          tawcroot_namespace.helper_pid, 0 };
+    if (ids_path(path, sizeof path, "/init", 0) || stat_start(r.pid, &r.start, &ppid)) return;
+    long fd = tawc_openat(AT_FDCWD, path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) return;
+    (void)tawc_write((int)fd, &r, sizeof r);
+    tawc_close((int)fd);
+}
+
+long tawcroot_namespace_join(void)
+{
+    char path[512];
+    struct init_rec r;
+    uint64_t start;
+    long ppid, e = ids_path(path, sizeof path, "/init", 0);
+    long fd = e ? e : tawc_openat(AT_FDCWD, path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW, 0);
+    if (fd < 0) return fd;
+    long n = tawc_read((int)fd, &r, sizeof r);
+    tawc_close((int)fd);
+    if (n != sizeof r || !(r.session & TAWC_NS_INIT_SESSION) || r.pid <= 0 ||
+        stat_start(r.pid, &start, &ppid) || start != r.start)
+        return TAWC_ESRCH;
+    e = tawcroot_install_lazy_filter(pid_lazy, sizeof pid_lazy / sizeof pid_lazy[0]);
+    if (e) return e;
+    tawcroot_namespace.init_pid = r.pid;
+    tawcroot_namespace.helper_pid = r.helper;
+    e = enter_session();
+    if (!e && (r.session & TAWC_NS_CGROUP)) e = tawcroot_cgroup_join();
+    if (e) return e;
+    long self = tawc_getpid();
+    if (ids_path(path, sizeof path, "/joined", self) || stat_start(self, &start, &ppid))
+        return TAWC_ESRCH;
+    fd = tawc_openat(AT_FDCWD, path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) return fd;
+    n = tawc_write((int)fd, &start, sizeof start);
+    tawc_close((int)fd);
+    if (n != sizeof start) return TAWC_EIO;
+    tawcroot_mounts_attach();
+    return 0;
 }
 
 void tawcroot_namespace_publish_ids(uint32_t uid, uint32_t gid)
@@ -788,7 +865,7 @@ void tawcroot_namespace_publish_ids(uint32_t uid, uint32_t gid)
     char path[512];
     long self = TAWC_RAW(TAWC_SYS_getpid, 0, 0, 0, 0, 0, 0), ppid;
     struct ids_rec r = { 0, uid, gid };
-    if (ids_path(path, sizeof path, self) || stat_start(self, &r.start, &ppid)) return;
+    if (ids_path(path, sizeof path, "/ids", self) || stat_start(self, &r.start, &ppid)) return;
     long fd = tawc_openat(AT_FDCWD, path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (fd < 0) return;
     (void)tawc_write((int)fd, &r, sizeof r);
@@ -805,7 +882,7 @@ int tawcroot_namespace_peer_ids(long pid, uint32_t *uid, uint32_t *gid)
         long ppid = 0;
         if (stat_start(pid, &start, &ppid)) return 1;
         struct ids_rec r;
-        long fd = ids_path(path, sizeof path, pid) ? -1 :
+        long fd = ids_path(path, sizeof path, "/ids", pid) ? -1 :
             tawc_openat(AT_FDCWD, path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW, 0);
         if (fd >= 0) {
             long got = tawc_read((int)fd, &r, sizeof r);

@@ -38,3 +38,32 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
       - name: Build tawcroot
         run: tawcroot/build.sh --abi=${{ matrix.abi }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tawcroot-${{ matrix.abi }}
+          path: build/tawcroot-${{ matrix.abi }}/libtawcroot.so
+          if-no-files-found: error
+
+  # Boots Debian sid systemd under the CI-built aarch64 tawcroot on an
+  # arm64 runner, as the unprivileged runner user. Catches arch bugs the
+  # x86_64 host tests can't; Android-only denials still need a device.
+  arm64-systemd:
+    needs: android-build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tawcroot-aarch64
+          path: build/tawcroot-aarch64
+      - name: Debian sid rootfs
+        run: |
+          docker run --name sid debian:sid sh -c \
+            'apt-get update && apt-get install -y --no-install-recommends systemd systemd-sysv dbus procps'
+          mkdir -p build/sid/rootfs
+          docker export sid | tar -x -C build/sid/rootfs --no-same-owner --exclude=dev/* 2>/dev/null || true
+      - name: Boot systemd
+        run: |
+          chmod +x build/tawcroot-aarch64/libtawcroot.so
+          tawcroot/systemd-smoke.sh build/tawcroot-aarch64/libtawcroot.so build/sid/rootfs 40

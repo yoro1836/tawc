@@ -262,6 +262,26 @@ static long open_emulated_leaf(int dirfd, const char *path, int flags,
 			   flags & ~(O_CREAT | O_EXCL), mode);
 }
 
+/* In an init session, a path relative to a procfs `dirfd` becomes
+ * absolute in place so /proc/1 and the stat/status rewrites apply
+ * (procps opens "<pid>/stat" against a /proc fd). Returns 1 if done. */
+static int proc_relative_to_abs(int dirfd, char *path, char *tmp)
+{
+	if (!tawcroot_namespace.init_pid || dirfd == AT_FDCWD ||
+	    path[0] == '/' || !path[0])
+		return 0;
+	struct stat st;
+	unsigned long pdev = tawcroot_proc_dev();
+	if (!pdev || TAWC_RAW(TAWC_SYS_fstat, dirfd, (long)&st, 0, 0, 0, 0) != 0 ||
+	    (unsigned long)st.st_dev != pdev)
+		return 0;
+	long n = tawcroot_compose_fd_relative(dirfd, path, tmp,
+					      TAWCROOT_PATH_SCRATCH_SIZE);
+	if (n <= 0 || !tawc_starts_with(tmp, "/proc")) return 0;
+	memcpy(path, tmp, (size_t)n + 1);
+	return 1;
+}
+
 static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
@@ -274,6 +294,7 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	char *path = scratch->buf[0];
 	long fe = fetch_guest_path(scratch, 0, gpath);
 	if (fe) return fe;
+	if (proc_relative_to_abs(dirfd, path, scratch->buf[1])) dirfd = AT_FDCWD;
 	long gamepad = tawcroot_gamepad_open(dirfd, path, flags);
 	if (gamepad != TAWC_ENOSYS) return gamepad;
 	long nsfd = tawcroot_namespace_open(path, flags);
@@ -1155,8 +1176,20 @@ static long handle_faccessat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	 * plain faccessat ignores flags. -ENOSYS makes glibc/musl fall
 	 * back to their own AT_SYMLINK_NOFOLLOW / AT_EACCESS emulation
 	 * on top of syscalls we do translate. */
-	if (args->nr == TAWC_SYS_faccessat2 && (int)args->d != 0)
-		return TAWC_ENOSYS;
+	if (args->nr == TAWC_SYS_faccessat2 && (int)args->d != 0) {
+		/* Except access on the fd itself (systemd 262 checks its
+		 * executor binary this way, and fails to boot on ENOSYS):
+		 * plain faccessat through its /proc/self/fd link. */
+		char c = 1;
+		int flags = (int)args->d;
+		if (!(flags & AT_EMPTY_PATH) || (flags & ~(AT_EMPTY_PATH | AT_EACCESS)) ||
+		    tawc_copy_from_guest(&c, 1, gpath) < 0 || c)
+			return TAWC_ENOSYS;
+		char link[64];
+		long e = tawc_proc_fd_path(link, sizeof link, dirfd, "");
+		if (e < 0) return e;
+		return TAWC_RAW(TAWC_SYS_faccessat, AT_FDCWD, (long)link, mode, 0, 0, 0);
+	}
 
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
 	long fe = fetch_guest_path(scratch, 0, gpath);
@@ -1416,6 +1449,11 @@ static long handle_fchmodat2(const tawcroot_syscall_args *args, ucontext_t *uc)
 		if (!result) result = TAWC_RAW(TAWC_SYS_fchmodat, AT_FDCWD, (long)path, args->c, 0, 0, 0);
 	}
 	if (owned) tawc_close(fd);
+	/* Same fake-root swallow as fchmodat: glibc routes fchmodat(3) with
+	 * AT_EMPTY_PATH here, as systemd does for its /dev/console reset. */
+	if ((result == TAWC_EPERM || result == TAWC_EACCES) &&
+	    tawcroot_identity_euid() == 0)
+		return 0;
 	return result;
 }
 
@@ -2077,6 +2115,25 @@ static long handle_inotify_add_watch(const tawcroot_syscall_args *args,
 	/* Empty suffix: the watch target is t.fd itself, reached only by
 	 * following the /proc magic link. */
 	if (!t.path || !*t.path) mask &= ~0x02000000U;
+	long rv = TAWC_RAW(TAWC_SYS_inotify_add_watch, inotify_fd,
+			   (long)host_path, mask, 0, 0, 0);
+	if (rv != TAWC_EACCES || !tawcroot_store_host_path_len) return rv;
+	/* Android SELinux denies apps watches on ptys; systemd waits on
+	 * /dev/console with one before every tty service. Give such a
+	 * device a watch on a never-touched store file instead. */
+	struct stat st;
+	if (TAWC_RAW(TAWC_SYS_fstatat, AT_FDCWD, (long)host_path,
+		     (long)&st, 0, 0, 0) || !S_ISCHR(st.st_mode))
+		return rv;
+	size_t n = 0;
+	if (tawc_str_append(host_path, TAWCROOT_PATH_SCRATCH_SIZE, &n, tawcroot_store_host_path) ||
+	    tawc_str_append(host_path, TAWCROOT_PATH_SCRATCH_SIZE, &n, "/watch-stub"))
+		return rv;
+	if (TAWC_RAW(TAWC_SYS_fstatat, AT_FDCWD, (long)host_path, (long)&st, 0, 0, 0)) {
+		long fd = tawc_openat(AT_FDCWD, host_path, O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
+		if (fd < 0) return rv;
+		tawc_close((int)fd);
+	}
 	return TAWC_RAW(TAWC_SYS_inotify_add_watch, inotify_fd,
 			(long)host_path, mask, 0, 0, 0);
 }
@@ -2918,9 +2975,12 @@ static long handle_statfs(const tawcroot_syscall_args *args, ucontext_t *uc)
 	if (t.ro) local.f_flags |= TAWC_ST_RDONLY;
 	long mm = tawcroot_mounts_magic(t.fd);
 	if (mm) local.f_type = mm;
-	/* /proc/sys is read-only in a container; inits key off that. */
-	if ((tawcroot_namespace.session & TAWC_NS_INIT_SESSION) && local.f_type == 0x9fa0 &&
-	    t.path && (tawc_streq(t.path, "sys") || tawc_starts_with(t.path, "sys/")))
+	/* /proc/sys and /sys are read-only in a container; inits key off
+	 * that (systemd then keeps /dev/console, not the host console). */
+	if ((tawcroot_namespace.session & TAWC_NS_INIT_SESSION) &&
+	    (local.f_type == 0x62656572 /*SYSFS_MAGIC*/ ||
+	     (local.f_type == 0x9fa0 && t.path &&
+	      (tawc_streq(t.path, "sys") || tawc_starts_with(t.path, "sys/")))))
 		local.f_flags |= TAWC_ST_RDONLY;
 	if (cgroup_on() &&
 	    tawcroot_cgroup_locate(t.fd, t.path, scratch->buf[3], TAWCROOT_PATH_SCRATCH_SIZE))

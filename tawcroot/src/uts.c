@@ -10,6 +10,7 @@
 #include "errno_neg.h"
 #include "io.h"
 #include "linkstore.h"
+#include "mounts.h"
 #include "namespace.h"
 #include "path_scratch.h"
 #include "raw_sys.h"
@@ -23,6 +24,8 @@
  * domainname. */
 struct names { char host[LEN], domain[LEN]; };
 
+static const char STORE[] = "/uts";
+
 static long open_store(int flags)
 {
     TAWCROOT_PATH_SCRATCH_AUTO(scratch);
@@ -30,7 +33,7 @@ static long open_store(int flags)
     size_t n = 0;
     if (!tawcroot_store_host_path_len) return TAWC_ENOENT;
     if (tawc_str_append(path, TAWCROOT_PATH_SCRATCH_SIZE, &n, tawcroot_store_host_path) ||
-        tawc_str_append(path, TAWCROOT_PATH_SCRATCH_SIZE, &n, "/uts"))
+        tawc_str_append(path, TAWCROOT_PATH_SCRATCH_SIZE, &n, STORE))
         return TAWC_ENAMETOOLONG;
     return tawc_openat(AT_FDCWD, path, flags | O_CLOEXEC | O_NOFOLLOW, 0600);
 }
@@ -76,6 +79,7 @@ long tawcroot_uts_syscall(const tawcroot_syscall_args *a, ucontext_t *uc)
     (void)uc;
     struct names n;
     if (a->nr == TAWC_SYS_uname) {
+        tawcroot_mounts_drain(STORE);
         long rv = TAWC_RAW(TAWC_SYS_uname, a->a, 0, 0, 0, 0, 0);
         if (rv || !session() || !load(&n)) return rv;
         char *uts = (char *)(uintptr_t)a->a;   /* kernel-validated */
@@ -114,5 +118,6 @@ long tawcroot_uts_proc_open(const char *path, int flags)
         return TAWC_EIO;
     }
     (void)tawc_lseek((int)fd, 0, 0 /* SEEK_SET */);
-    return fd;
+    /* journald polls this fd for hostname changes. */
+    return tawcroot_mounts_watchable(fd, (flags & O_CLOEXEC) != 0, STORE);
 }

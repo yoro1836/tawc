@@ -1,0 +1,117 @@
+name: apk
+
+# Debug APK (me.phie.tawc.dev, arm64-v8a) in the same configuration as
+# the F-Droid recipe: tawcroot only, libhybris + cpu graphics. Built in
+# Debian trixie with the host packages from notes/building.md.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    timeout-minutes: 300
+    env:
+      ANDROID_HOME: /opt/android-sdk
+      JAVA_HOME: /usr/lib/jvm/java-21-openjdk-amd64
+      NDK_VERSION: 27.2.12479018
+      CMDLINE_TOOLS: commandlinetools-linux-11076708_latest.zip
+      # Java's user.home is /root in the container, not $HOME; keep
+      # Gradle's caches where actions/cache looks.
+      GRADLE_USER_HOME: /github/home/.gradle
+    steps:
+      - name: Host packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git unzip \
+            openjdk-21-jdk-headless rustup build-essential make pkg-config curl \
+            libarchive-tools file meson ninja-build bison autoconf automake libtool \
+            libtool-bin libltdl-dev perl python3 python3-libxml2 xsltproc libexpat1-dev \
+            libwayland-dev libwayland-bin libwayland-egl-backend-dev wayland-protocols \
+            libvulkan-dev patchelf libx11-dev libx11-xcb-dev libxcb1-dev \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu libc6-arm64-cross linux-libc-dev-arm64-cross
+          git config --global --add safe.directory '*'
+      - uses: actions/checkout@v4
+      # Toolchains change rarely; an exact key hit skips the save.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /github/home/.gradle/caches
+            /github/home/.gradle/wrapper
+            ~/.cargo/registry
+            ~/.cargo/bin
+            ~/.rustup
+            /opt/android-sdk
+          key: apk-tools-${{ hashFiles('rust-toolchain.toml', 'gradle/wrapper/gradle-wrapper.properties', 'gradle/libs.versions.toml', '**/*.gradle.kts') }}
+          restore-keys: apk-tools-
+      # Dep checkouts and their builds, the Rust target dir and Gradle's
+      # task history, so unchanged deps stay UP-TO-DATE. Keyed on what
+      # feeds those builds; tawcroot/app-only changes reuse it unsaved.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            build
+            deps
+            !deps/.gitignore
+            !deps/deps.list
+            !deps/*-patches/**
+            !deps/libhybris-shims/**
+            compositor/target
+            .gradle
+            app/src/main/assets/libhybris
+            app/src/main/assets/xwayland
+          key: apk-build-${{ hashFiles('deps/deps.list', 'deps/*-patches/**', 'deps/libhybris-shims/**', 'scripts/**', 'compositor/**', 'app/build.gradle.kts', 'rust-toolchain.toml') }}
+          restore-keys: apk-build-
+      - name: Sync cached deps
+        run: |
+          # A restored checkout from an older pin would fail dep_ensure.
+          grep -v '^#' deps/deps.list | while IFS="$(printf '\t')" read -r name _ commit _ dest; do
+            [ -n "$name" ] && [ -d "$dest/.git" ] || continue
+            [ "$(git -C "$dest" rev-parse HEAD)" = "$commit" ] || scripts/update-deps.sh "$name"
+          done
+      - name: Android SDK
+        run: |
+          if [ ! -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            curl -fsSLo /tmp/tools.zip "https://dl.google.com/android/repository/$CMDLINE_TOOLS"
+            mkdir -p "$ANDROID_HOME/cmdline-tools"
+            unzip -q /tmp/tools.zip -d "$ANDROID_HOME/cmdline-tools"
+            mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          fi
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "ndk;$NDK_VERSION" >/dev/null
+      - name: Rust
+        run: |
+          # Debian's rustup keeps its proxies (cargo, rustc) here.
+          export PATH="/usr/lib/rustup/bin:$HOME/.cargo/bin:$PATH"
+          echo "/usr/lib/rustup/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          targets=$(sed -n '/^targets/,/]/p' rust-toolchain.toml | grep -o '"[^"]*"' | tr -d '"' | paste -sd,)
+          rustup toolchain install "$channel" --profile minimal --target "$targets"
+          command -v cargo-ndk >/dev/null || cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Build APK
+        run: |
+          # Fixed debug key, so each artifact installs over the last.
+          # In the container $HOME is /github/home but Java's user.home
+          # is /root, so point AGP at the key explicitly.
+          export ANDROID_USER_HOME="$PWD/build/android-user-home"
+          mkdir -p "$ANDROID_USER_HOME"
+          cp .github/debug.keystore "$ANDROID_USER_HOME/debug.keystore"
+          printf 'tawcMethods=tawcroot\n' >> gradle.properties
+          scripts/build-app.sh --abi=arm64-v8a --graphics=libhybris,cpu
+          # Must stay the same from run to run.
+          signer=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | tail -1)
+          "$signer" verify --print-certs app/build/outputs/apk/debug/*.apk | grep SHA-256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tawc-dev-arm64-v8a
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

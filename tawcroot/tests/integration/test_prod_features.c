@@ -138,6 +138,8 @@ static bool build_rootfs(void)
 		  "static_mount_check" },
 		{ TAWCROOT_STATIC_NET_CHECK_BIN,
 		  "static_net_check" },
+		{ TAWCROOT_STATIC_JOIN_CHECK_BIN,
+		  "static_join_check" },
 	};
 	for (size_t i = 0; i < sizeof fixtures / sizeof fixtures[0]; i++) {
 		snprintf(p, sizeof p, "%s/bin/%s",
@@ -666,7 +668,8 @@ test(prod_init_pid_isolation)
 	char pid[24];
 	snprintf(pid, sizeof pid, "%d", (int)host);
 	const char *args[] = {
-		"-r", FAKE_ROOTFS, "--init", "--", "/bin/static_init_check", pid, NULL
+		"-r", FAKE_ROOTFS, "-b", "/proc:proc", "--init", "--",
+		"/bin/static_init_check", pid, NULL
 	};
 	int rc = run_with(args);
 	int alive = waitpid(host, 0, WNOHANG) == 0;
@@ -674,6 +677,21 @@ test(prod_init_pid_isolation)
 	waitpid(host, 0, 0);
 	test_int_eq(rc, 42);
 	test_true(alive);
+	rh_rmrf(FAKE_ROOTFS);
+}
+
+/* /proc lists the init as 1 and hides the --console relay. */
+test(prod_init_proc_listing)
+{
+	rh_rmrf(FAKE_ROOTFS);
+	test_true(build_rootfs());
+	char log[512];
+	snprintf(log, sizeof log, "%s/console.log", FAKE_ROOTFS);
+	const char *args[] = {
+		"-r", FAKE_ROOTFS, "-b", "/proc:/proc", "--console", log,
+		"--init", "--", "/bin/static_init_check", "solo", NULL
+	};
+	test_int_eq(run_with(args), 42);
 	rh_rmrf(FAKE_ROOTFS);
 }
 
@@ -698,6 +716,38 @@ test(prod_init_net)
 		"/bin/static_net_check", NULL
 	};
 	test_int_eq(run_with(args), 42);
+	rh_rmrf(FAKE_ROOTFS);
+}
+
+/* `--join` enters a running --init session from outside it, and fails
+ * once that init is gone. */
+test(prod_init_join)
+{
+	rh_rmrf(FAKE_ROOTFS);
+	test_true(build_rootfs());
+	char ready[PATH_MAX];
+	snprintf(ready, sizeof ready, "%s/ready", FAKE_ROOTFS);
+	pid_t init = fork();
+	test_true(init >= 0);
+	if (init == 0) {
+		execl(TAWCROOT_PROD_BIN, TAWCROOT_PROD_BIN, "-r", FAKE_ROOTFS,
+		      "-b", "/proc:/proc", "--init", "--cgroup", "--",
+		      "/bin/static_join_check", "init", (char *)NULL);
+		_exit(127);
+	}
+	for (int i = 0; i < 500 && access(ready, F_OK) != 0; i++) usleep(10000);
+	const char *args[] = {
+		"-r", FAKE_ROOTFS, "-b", "/proc:/proc", "--join", "--",
+		"/bin/static_join_check", "join", NULL
+	};
+	int rc = run_with(args);
+	kill(init, SIGTERM);
+	int st = 0;
+	waitpid(init, &st, 0);
+	int after = run_with(args);
+	test_int_eq(rc, 42);
+	test_true(WIFEXITED(st) && WEXITSTATUS(st) == 42);
+	test_int_eq(after, 97);
 	rh_rmrf(FAKE_ROOTFS);
 }
 

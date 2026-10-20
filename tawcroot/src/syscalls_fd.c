@@ -390,7 +390,7 @@ static long handle_fcntl(const tawcroot_syscall_args *args, ucontext_t *uc)
 /* Device of the host procfs, which every /proc view (bind or guest
  * mount of the same instance) shares. Racing first calls compute the
  * same value. */
-static unsigned long proc_dev(void)
+unsigned long tawcroot_proc_dev(void)
 {
 	static unsigned long dev;
 	unsigned long d = __atomic_load_n(&dev, __ATOMIC_RELAXED);
@@ -405,7 +405,8 @@ static unsigned long proc_dev(void)
 }
 
 /* Drop /proc/<pid> entries of processes outside the fake pid
- * namespace from a linux_dirent64 buffer. Returns the kept length. */
+ * namespace from a linux_dirent64 buffer and list the init as "1".
+ * Returns the kept length. */
 static long hide_host_pids(char *buf, long n)
 {
 	long out = 0;
@@ -418,6 +419,10 @@ static long hide_host_pids(char *buf, long n)
 		const char *c = name;
 		for (; *c >= '0' && *c <= '9'; ++c) pid = pid * 10 + (*c - '0');
 		int keep = *c || !pid || tawcroot_namespace_is_guest(pid);
+		if (keep && !*c && pid == tawcroot_namespace.init_pid) {
+			buf[off + 19] = '1';
+			buf[off + 20] = 0;
+		}
 		if (keep) {
 			if (out != off) memmove(buf + out, buf + off, reclen);
 			out += reclen;
@@ -456,7 +461,7 @@ static long handle_getdents64(const tawcroot_syscall_args *args,
 	struct stat dst;
 	if (TAWC_RAW(TAWC_SYS_fstat, fd, (long)&dst, 0, 0, 0, 0) != 0)
 		return n;
-	unsigned long pdev = proc_dev();
+	unsigned long pdev = tawcroot_proc_dev();
 	if (pdev && (unsigned long)dst.st_dev != pdev) {
 		if (tawcroot_store_link_fd >= 0 && tawcroot_store_dev &&
 		    (unsigned long)dst.st_dev == tawcroot_store_dev)
@@ -746,8 +751,16 @@ static long handle_ioctl(const tawcroot_syscall_args *args, ucontext_t *uc)
 			return handle_tcgets2_fallback(fd, arg);
 		return handle_tcsets2_fallback(fd, cmd, arg);
 	}
-	return TAWC_RAW(TAWC_SYS_ioctl, fd, args->b, arg,
-	                args->d, args->e, args->f);
+	long rv = TAWC_RAW(TAWC_SYS_ioctl, fd, args->b, arg,
+	                   args->d, args->e, args->f);
+	/* Android's xperm policy denies apps the file-attribute ioctls
+	 * (FS_IOC_GETFLAGS 'f', FS_IOC_FSGETXATTR 'X') on their own files.
+	 * Report them unsupported: systemd treats EACCES from its
+	 * StateDirectory= quota probe as fatal but ENOTTY as "no quotas". */
+	unsigned int type = (cmd >> 8) & 0xff;
+	if (rv == TAWC_EACCES && (type == 'f' || type == 'X'))
+		return TAWC_ENOTTY;
+	return rv;
 }
 
 void tawcroot_fd_register(void)

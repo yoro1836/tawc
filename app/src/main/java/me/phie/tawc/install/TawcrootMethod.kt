@@ -1,12 +1,18 @@
 package me.phie.tawc.install
 
 import android.content.Context
+import android.system.Os
+import android.util.Log
 import me.phie.tawc.AppPaths
 import me.phie.tawc.GraphicsBackend
 import me.phie.tawc.Settings
 import me.phie.tawc.compositor.CompositorService
+import me.phie.tawc.session.Reason
+import me.phie.tawc.session.SessionHolds
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 /**
  * Rootless implementation of [InstallationMethod] using the
@@ -116,7 +122,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
             add("/system/bin/setsid")
             addAll(rootfsArgv(
                 rootfs, graphics, assetBinds, externalBinds, andoHostDir,
-                RootShell.resolve(File(rootfs)),
+                RootShell.resolve(File(rootfs)), join = ensureSystemd(rootfs),
             ))
             add(RootShell.command(File(rootfs)))
             if (command != null) {
@@ -242,7 +248,9 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         val andoHostDir = store.andoHostDir(rootfs)
         val tmpdir = prepareSpawn(rootfs, assetBinds, externalBinds)
         val shell = RootShell.resolve(File(rootfs))
-        val argv = rootfsArgv(rootfs, graphics, assetBinds, externalBinds, andoHostDir, shell)
+        val argv = rootfsArgv(
+            rootfs, graphics, assetBinds, externalBinds, andoHostDir, shell, join = ensureSystemd(rootfs),
+        )
         return SpawnEnvelope(
             argv, shell, listOf("TMPDIR=$tmpdir"), homeCwd(rootfs, tmpdir), RootShell.command(File(rootfs)),
         )
@@ -315,7 +323,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         return if (java.nio.file.Files.isDirectory(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) home.path else tmpdir
     }
 
-    /** `<tawcroot> -r <rootfs> -b … -- /usr/bin/env -i K=V …`
+    /** `<tawcroot> -r <rootfs> -b … [--join] -- /usr/bin/env -i K=V …`
      * — the shared spawn prefix up to (and including) the rootfs env;
      * callers append the program to run. `SHELL` in that env is root's
      * passwd shell even on the bash-only command paths, so scripts and
@@ -327,12 +335,14 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         externalBinds: List<ExternalBind>,
         andoHostDir: String?,
         shell: String,
+        join: Boolean = false,
     ): List<String> = buildList {
         add(tawcrootBin)
         addAll(listOf("-r", rootfs))
         for (spec in bindSpecs(assetBinds, externalBinds, andoHostDir)) {
             addAll(listOf("-b", spec.arg()))
         }
+        if (join) add("--join")
         add("--")
         addAll(RootfsEnv.envArgv(
             RootfsEnv.Method.TAWCROOT,
@@ -456,6 +466,107 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         ProotArchiveExtractor.extract(tarball, rootfs, stripPrefix, onLine)
     }
 
+    /**
+     * Opt-in systemd boot ([Installation.systemdBoot]): the first spawn
+     * boots the rootfs's systemd as the session's pid 1 (`tawcroot
+     * --init --cgroup`), and every spawn while it lives `--join`s it,
+     * so shells share its mounts, cgroups and hostname and `systemctl`
+     * reaches pid 1. The init lives until [stopSystemd] or app death
+     * (tawcroot's PDEATHSIG) and holds a session meanwhile. Its console
+     * (and tawcroot's own errors) go to guest `/var/log/tawc-console.log`
+     * so a failed boot is readable from a plain shell. Returns whether a
+     * session is running to join. See notes/tawcroot/systemd.md.
+     */
+    fun ensureSystemd(rootfs: String): Boolean = try {
+        bootSystemd(rootfs)
+    } catch (t: Throwable) {
+        // A failed boot must not take the spawn (or the app) down with it.
+        Log.w(TAG, "systemd boot failed", t)
+        false
+    }
+
+    private fun bootSystemd(rootfs: String): Boolean {
+        val id = store.idForRootfs(rootfs) ?: return false
+        if (store.load(id)?.systemdBoot != true) return false
+        synchronized(inits) {
+            if (inits[rootfs]?.isAlive == true) return true
+            val initBin = SYSTEMD_PATHS.firstOrNull { File(rootfs, it.removePrefix("/")).canExecute() }
+                ?: return false
+            val stateDir = File(store.installationDir(id), "tawcroot").apply { mkdirs() }
+            val record = File(stateDir, "init").apply { delete() }
+            val console = File(rootfs, "var/log/tawc-console.log").apply { parentFile?.mkdirs() }
+            val assetBinds = assetBinds()
+            val externalBinds = externalBindsFor(rootfs)
+            val tmpdir = prepareSpawn(rootfs, assetBinds, externalBinds)
+            val argv = buildList {
+                add("/system/bin/setsid")
+                add(tawcrootBin)
+                addAll(listOf("-r", rootfs))
+                // Not the X11 socket bind: boot-time tmpfiles empties
+                // /tmp/.X11-unix, which would delete Xwayland's socket.
+                for (spec in bindSpecs(assetBinds, externalBinds, store.andoHostDir(rootfs))) {
+                    if (spec.dst != "/tmp/.X11-unix") addAll(listOf("-b", spec.arg()))
+                }
+                // A pty console copied into the log: systemd only logs to a tty.
+                addAll(listOf("--console", console.path))
+                addAll(listOf("--init", "--cgroup", "--", "/usr/bin/env", "-i", "container=tawc", initBin))
+            }
+            console.writeText("")
+            val builder = ProcessBuilder(argv)
+                .directory(File(tmpdir))
+                .redirectErrorStream(true)
+                .redirectOutput(ProcessBuilder.Redirect.appendTo(console))
+                .also {
+                    it.environment().clear()
+                    it.environment()["TMPDIR"] = tmpdir
+                }
+            // Fork from a thread that outlives the init: tawcroot's
+            // PDEATHSIG fires when the forking *thread* exits, and
+            // spawns often come from short-lived worker threads.
+            val started = java.util.concurrent.SynchronousQueue<Result<Process>>()
+            thread(name = "tawc-systemd", isDaemon = true) {
+                val proc = try {
+                    builder.start()
+                } catch (t: Throwable) {
+                    started.put(Result.failure(t))
+                    return@thread
+                }
+                val hold = SessionHolds.acquire(Reason.Command("systemd"))
+                started.put(Result.success(proc))
+                try {
+                    val code = proc.waitFor()
+                    console.appendText("tawc: systemd exited with status $code\n")
+                } catch (_: Throwable) {
+                } finally {
+                    hold.release()
+                }
+            }
+            val proc = started.take().getOrThrow()
+            inits[rootfs] = proc
+            // tawcroot publishes the session before exec'ing systemd.
+            val deadline = System.nanoTime() + INIT_PUBLISH_TIMEOUT_NANOS
+            while (!record.exists() && proc.isAlive && System.nanoTime() < deadline) Thread.sleep(20)
+            // An init that dies during startup would leave joiners to exit 97.
+            if (record.exists()) proc.waitFor(INIT_SETTLE_MILLIS, TimeUnit.MILLISECONDS)
+            return record.exists() && proc.isAlive
+        }
+    }
+
+    /** Power off [rootfs]'s systemd session if one runs: SIGRTMIN+4
+     *  (systemd's poweroff), then SIGKILL after a grace period. */
+    fun stopSystemd(rootfs: String) {
+        val proc = synchronized(inits) { inits.remove(rootfs) } ?: return
+        if (!proc.isAlive) return
+        // Process.pid() isn't in the Android API surface; the impl's field is.
+        val pid = try {
+            proc.javaClass.getDeclaredField("pid").apply { isAccessible = true }.getInt(proc)
+        } catch (_: Throwable) {
+            -1
+        }
+        if (pid > 0) try { Os.kill(pid, SIGRTMIN_PLUS_4) } catch (_: Throwable) {}
+        if (!proc.waitFor(SYSTEMD_STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) proc.destroyForcibly()
+    }
+
     // ---- internals ---------------------------------------------------
 
     /** One `-b` bind: host [src] exposed at in-rootfs [dst], read-only
@@ -475,6 +586,15 @@ class TawcrootMethod(context: Context) : InstallationMethod {
 
     companion object {
         const val KEY = "tawcroot"
+
+        /** Running systemd inits by rootfs ([ensureSystemd]). */
+        private val inits = HashMap<String, Process>()
+        private val SYSTEMD_PATHS = listOf("/usr/lib/systemd/systemd", "/lib/systemd/systemd")
+        private const val INIT_PUBLISH_TIMEOUT_NANOS = 2_000_000_000L
+        private const val INIT_SETTLE_MILLIS = 300L
+        private const val TAG = "tawc"
+        private const val SYSTEMD_STOP_TIMEOUT_SECONDS = 10L
+        private const val SIGRTMIN_PLUS_4 = 38
         /** In-rootfs path the share dir is exposed at. Single source
          *  of truth — also referenced by [RootfsEnv] (WAYLAND_DISPLAY)
          *  and the chroot/proot install methods. */
