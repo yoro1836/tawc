@@ -180,6 +180,8 @@ Debian trixie's systemd 257 and sid's 262 boot to `graphical.target`
 (on the host, x86_64) with no failed units besides `getty@tty1`: journald, udevd, networkd, resolved, logind, dbus, hostnamed and
 console-getty run, `busctl`/`hostnamectl`/`resolvectl` work, and
 `tmp.mount`, `run-lock.mount`, `dev-mqueue.mount` mount.
+On an arm64 Android phone (run via `run-as`), sid's 262 reports
+`running` with no failed units (2026-10-20), console login included.
 - `systemd-firstboot` waits on the console when `/etc/machine-id` is
   unset; the rootfs needs its first-boot settings done or the unit masked.
 - `/run/initctl` and `/run/systemd/journal/dev-log` symlinks into a
