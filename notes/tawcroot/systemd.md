@@ -44,6 +44,10 @@ subreaper. On top of that, in an init session:
 - Kernel keyrings (`add_key`, `request_key`, `keyctl`) return ENOSYS.
   Android SELinux lets apps join a session keyring but not link the
   user keyring, which systemd treats as fatal (`status=237/KEYRING`).
+- Android SELinux also denies apps chmod on their ptys and inotify
+  watches on them. `fchmodat2` fakes success for root like `fchmodat`,
+  and a denied watch on a char device watches `<store>/watch-stub`
+  instead (systemd waits on `/dev/console` before tty services).
 
 ## Mounts
 Code: `src/mounts.c`. The session has one mount table, a flock-guarded

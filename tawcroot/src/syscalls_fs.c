@@ -1428,6 +1428,11 @@ static long handle_fchmodat2(const tawcroot_syscall_args *args, ucontext_t *uc)
 		if (!result) result = TAWC_RAW(TAWC_SYS_fchmodat, AT_FDCWD, (long)path, args->c, 0, 0, 0);
 	}
 	if (owned) tawc_close(fd);
+	/* Same fake-root swallow as fchmodat: glibc routes fchmodat(3) with
+	 * AT_EMPTY_PATH here, as systemd does for its /dev/console reset. */
+	if ((result == TAWC_EPERM || result == TAWC_EACCES) &&
+	    tawcroot_identity_euid() == 0)
+		return 0;
 	return result;
 }
 
@@ -2089,6 +2094,25 @@ static long handle_inotify_add_watch(const tawcroot_syscall_args *args,
 	/* Empty suffix: the watch target is t.fd itself, reached only by
 	 * following the /proc magic link. */
 	if (!t.path || !*t.path) mask &= ~0x02000000U;
+	long rv = TAWC_RAW(TAWC_SYS_inotify_add_watch, inotify_fd,
+			   (long)host_path, mask, 0, 0, 0);
+	if (rv != TAWC_EACCES || !tawcroot_store_host_path_len) return rv;
+	/* Android SELinux denies apps watches on ptys; systemd waits on
+	 * /dev/console with one before every tty service. Give such a
+	 * device a watch on a never-touched store file instead. */
+	struct stat st;
+	if (TAWC_RAW(TAWC_SYS_fstatat, AT_FDCWD, (long)host_path,
+		     (long)&st, 0, 0, 0) || !S_ISCHR(st.st_mode))
+		return rv;
+	size_t n = 0;
+	if (tawc_str_append(host_path, TAWCROOT_PATH_SCRATCH_SIZE, &n, tawcroot_store_host_path) ||
+	    tawc_str_append(host_path, TAWCROOT_PATH_SCRATCH_SIZE, &n, "/watch-stub"))
+		return rv;
+	if (TAWC_RAW(TAWC_SYS_fstatat, AT_FDCWD, (long)host_path, (long)&st, 0, 0, 0)) {
+		long fd = tawc_openat(AT_FDCWD, host_path, O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
+		if (fd < 0) return rv;
+		tawc_close((int)fd);
+	}
 	return TAWC_RAW(TAWC_SYS_inotify_add_watch, inotify_fd,
 			(long)host_path, mask, 0, 0, 0);
 }
