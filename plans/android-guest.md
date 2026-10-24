@@ -1,12 +1,14 @@
 # Android guest: Waydroid images on tawcroot
 
-Run a full Android userspace rootless inside the TAWC app: an unmodified
-Waydroid LineageOS image booted by `tawcroot --init`, with binder emulated
-in userspace and the display going through the TAWC compositor.
+tawcroot side of booting a Waydroid LineageOS image rootless with
+`tawcroot --init` and binder emulated in userspace. The product is
+VineOS ([yoro1836/lilac](https://github.com/yoro1836/lilac), see its
+`docs/rootless.md` for the app, compositor and ROM structure); it consumes
+tawcroot and binderd from this repo as a pinned submodule.
 
 Rule of thumb: **kernel interfaces are emulated in tawcroot** (works for any
 image, including redroid), **Android policy problems get ROM patches** (only
-when emulation would be absurd, built on Hetzner, see "ROM builds").
+when emulation would be absurd; ROM builds live in lilac).
 
 ## Image facts (verified)
 
@@ -47,7 +49,7 @@ checklist the TAWC side has to cover.
 | tmpfs `/dev`, devpts, `/dev/{null,zero,full,tty,fuse,uhid,tun,sw_sync,ion}`, GPU nodes | tawcroot device table; absent nodes stay absent |
 | LXC caps: sys_admin, net_admin, setuid/setgid, mknod, chown, dac_override, … | tawcroot virtual root/identity, mount/cgroup emulation |
 | `/vendor/waydroid.prop` (bind file, base props) | written by the installer into the rootfs |
-| Wayland socket → `/run/user/1000/wayland-0` | bind of the TAWC compositor socket |
+| Wayland socket → `/run/user/1000/wayland-0` | bind of the VineOS compositor socket |
 | Pulse socket | later (see `plans/audio.md`) |
 | `data` dir bind | per-instance dir under app data |
 | Host binder services `waydroidclipboard`, `waydroidhardware`, `waydroidnotifications`, `waydroidusermonitor`; calls guest `waydroidplatform` | host-services bridge registered in binderd |
@@ -56,9 +58,9 @@ checklist the TAWC side has to cover.
 ## Architecture
 
 ```
-TAWC app process (app uid)
-├─ Kotlin: install UI, session service, host-services bridge (client of binderd)
-├─ compositor (Rust, Wayland server)  ◄── wayland-0 ──┐
+VineOS app process (app uid)
+├─ app: UI, helper, host-services bridge (client of binderd)
+├─ vine compositor (Wayland server)   ◄── wayland-0 ──┐
 ├─ binderd (one per instance)                          │
 │    contexts: binder / hwbinder / vndbinder           │
 │    nodes, refs, txn stacks, death notifications      │
@@ -90,7 +92,7 @@ TAWC app process (app uid)
   notifications, objects BINDER/HANDLE/FD/FDA/PTR (scatter-gather for HIDL),
   `SET_CONTEXT_MGR_EXT`, `TRANSACTION_SG`, A13 ioctls (`FREEZE`,
   `GET_EXTENDED_ERROR`, …), binderfs `features/` files.
-- binderd also exposes a host API so the Kotlin bridge can register the
+- binderd also exposes a host API so the app's bridge can register the
   `waydroid*` services and call `waydroidplatform`.
 
 ## Code layout
@@ -101,9 +103,7 @@ TAWC app process (app uid)
 | `tawcroot/src/binder.c` | in-handler shim: open/ioctl/close hooks, memfd buffers, per-thread connections |
 | `tawcroot/binderd/` | daemon: ordinary libc C, static; NDK build like `ando/`, host build for tests |
 | `tawcroot/tests/hosted/test_binder_*.c`, `tests/integration/` | protocol tests, then real guests talking through binderd |
-| `app/…` new distro kind `android` | OTA fetch + sha256, ext4 extract, prop overlay, session start (binderd + `tawcroot --init`), host-services bridge |
 | `scripts/android-guest/` | dev helpers (host-side extract, push, boot log capture) |
-| `rom/` (later) | Waydroid `local_manifests` patches + Hetzner build scripts |
 
 ## Boot flow
 
@@ -131,18 +131,11 @@ TAWC app process (app uid)
    death notification, scatter-gather.
 2. On device: `servicemanager` + `hwservicemanager` + `service list` under
    tawcroot (needs a device target).
-3. surfaceflinger + composer HAL → first frame in the TAWC compositor.
+3. surfaceflinger + composer HAL → first frame in the VineOS compositor.
 4. system_server + launcher + input; freeze the ROM-patch list.
-5. Host-services bridge (clipboard, notifications, app list), install UI.
+5. Host-services bridge (clipboard, notifications, app list) on the binderd host API.
 6. Own ROM builds only if milestone 4 requires them; redroid `_64only` as a
    second image family.
-
-## ROM builds
-
-Hetzner Cloud, hourly: create a CPX51-class server (16 vCPU, 32 GB RAM,
-360 GB disk; add swap), sync Waydroid's LineageOS tree, build, pull
-artifacts, delete the server. Keep a snapshot only when iterating often.
-Deleting is what stops billing; script it.
 
 ## Risks
 
@@ -158,8 +151,6 @@ Deleting is what stops billing; script it.
 - 16 KB page kernels: the guest's 4 KB-aligned ELFs will not load.
 - Memory: a booted Android 13 needs roughly 1.5–2 GB.
 
-## Open decisions
-
-- Product shell: build this as a distro kind inside the TAWC app (reuses
-  install flow, sessions, compositor, multi-activity windows) and decide
-  later whether lilac/VineOS consumes the pieces, or port to lilac now.
+- **File ownership**: tawcroot reports files root-owned and has no per-file
+  uid store; Android needs per-uid ownership (`/data/data/<pkg>`, `system`).
+  Needs an ownership store.
