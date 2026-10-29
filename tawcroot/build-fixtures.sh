@@ -143,6 +143,7 @@ build_static  static_mknod_chr_fake
 build_static_c static_namespace_check
 build_static_c static_init_check
 build_static_c static_cgroup_check
+build_static_c static_masked_wait_check
 build_static_c static_mount_check
 build_static_c static_net_check
 build_static_c static_join_check

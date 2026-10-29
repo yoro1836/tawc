@@ -335,6 +335,12 @@ $(OUT)/programs/static_cgroup_check: $(SRC_TS)/integration/programs/static_cgrou
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -static -Wl,--build-id=none $< -o $@
 
+# static_masked_wait_check: static C (libc.a) — signal handlers during
+# waits whose caller mask blocks everything. See the source for exit codes.
+$(OUT)/programs/static_masked_wait_check: $(SRC_TS)/integration/programs/static_masked_wait_check.c | $(OUT)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -static -Wl,--build-id=none $< -o $@
+
 # static_mount_check: static C (libc.a) — `--init` mount emulation
 # (tmpfs, bind, move, umount, mountinfo). See the source for exit codes.
 $(OUT)/programs/static_mount_check: $(SRC_TS)/integration/programs/static_mount_check.c | $(OUT)

@@ -417,6 +417,14 @@ hardening:
   to other signals. There is no per-thread mask shadow or TID table.
   Programs requiring a blockable SIGSYS are not supported; pretending it
   was blocked cannot provide that behavior.
+- `rt_sigsuspend`, and `ppoll` / `pselect6` / `epoll_pwait{,2}` with a
+  mask: strip `SIGSYS` and re-issue from the handler. A handler that
+  runs during the wait inherits that mask, so its first trapped syscall
+  (its `rt_sigreturn` at the latest) would otherwise be a kernel kill.
+  JavaScriptCore's thread suspension (Bun, Claude Code) sigsuspends
+  with everything but its own signal blocked. The guest handler then
+  runs on top of tawcroot's frame and sees tawcroot's registers. The
+  filter lets the maskless forms run natively.
 - `sigaltstack`: native; the loader advertises the signal-stack budget.
 
 - `seccomp(SECCOMP_SET_MODE_FILTER)` and

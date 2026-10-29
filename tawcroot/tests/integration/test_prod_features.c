@@ -134,6 +134,8 @@ static bool build_rootfs(void)
 		  "static_init_check" },
 		{ TAWCROOT_STATIC_CGROUP_CHECK_BIN,
 		  "static_cgroup_check" },
+		{ TAWCROOT_STATIC_MASKED_WAIT_CHECK_BIN,
+		  "static_masked_wait_check" },
 		{ TAWCROOT_STATIC_MOUNT_CHECK_BIN,
 		  "static_mount_check" },
 		{ TAWCROOT_STATIC_NET_CHECK_BIN,
@@ -758,6 +760,19 @@ test(prod_cgroup_session)
 	const char *args[] = {
 		"-r", FAKE_ROOTFS, "--init", "--cgroup", "--",
 		"/bin/static_cgroup_check", NULL
+	};
+	test_int_eq(run_with(args), 42);
+	rh_rmrf(FAKE_ROOTFS);
+}
+
+/* A handler run during sigsuspend/ppoll/pselect/epoll_pwait with an
+ * all-blocking caller mask can still make translated syscalls. */
+test(prod_masked_wait_handler_syscalls)
+{
+	rh_rmrf(FAKE_ROOTFS);
+	test_true(build_rootfs());
+	const char *args[] = {
+		"-r", FAKE_ROOTFS, "--", "/bin/static_masked_wait_check", NULL
 	};
 	test_int_eq(run_with(args), 42);
 	rh_rmrf(FAKE_ROOTFS);

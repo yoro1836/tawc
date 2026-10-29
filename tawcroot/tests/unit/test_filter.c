@@ -494,9 +494,11 @@ test(filter_large_set_routes_every_nr)
 	for (int nr = 0; nr < 500; nr++) {
 		int trapped = nr % 3 == 1 && nr < 480;
 		if (nr == TAWC_SYS_rt_sigreturn) trapped = 1;
+		/* Non-NULL args, so masked waits (ppoll, ...) trap too. */
 		struct test_seccomp_data d = {
 			.nr = nr, .arch = TEST_AUDIT_ARCH,
 			.instruction_pointer = OUT_OF_STUB,
+			.args = { 1, 1, 1, 1, 1, 1 },
 		};
 		uint32_t want = trapped ? SECCOMP_RET_TRAP : SECCOMP_RET_ALLOW;
 		test_int_eq(run_filter(prog, (size_t)n, &d), want);
@@ -547,4 +549,32 @@ test(filter_sigprocmask_traps_only_mask_growth)
 	/* The following NR still routes. */
 	d.nr = TAWC_SYS_openat;
 	test_int_eq(build_and_run(traps, 2, STUB_ADDR, 0, TEST_AUDIT_ARCH, &d), SECCOMP_RET_TRAP);
+}
+
+test(filter_masked_waits_trap_only_with_mask)
+{
+	int traps[] = { TAWC_SYS_ppoll, TAWC_SYS_pselect6, TAWC_SYS_epoll_pwait,
+			TAWC_SYS_epoll_pwait2, TAWC_SYS_openat };
+	static const struct { int nr, arg; } cases[] = {
+		{ TAWC_SYS_ppoll, 3 }, { TAWC_SYS_pselect6, 5 },
+		{ TAWC_SYS_epoll_pwait, 4 }, { TAWC_SYS_epoll_pwait2, 4 },
+	};
+	for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+		struct test_seccomp_data d = {
+			.nr = cases[i].nr, .arch = TEST_AUDIT_ARCH,
+			.instruction_pointer = OUT_OF_STUB,
+		};
+		test_int_eq(build_and_run(traps, 5, STUB_ADDR, 0, TEST_AUDIT_ARCH, &d), SECCOMP_RET_ALLOW);
+		d.args[cases[i].arg] = 0x7ffc00001000ULL;
+		test_int_eq(build_and_run(traps, 5, STUB_ADDR, 0, TEST_AUDIT_ARCH, &d), SECCOMP_RET_TRAP);
+		d.args[cases[i].arg] = 0x100000000ULL;
+		test_int_eq(build_and_run(traps, 5, STUB_ADDR, 0, TEST_AUDIT_ARCH, &d), SECCOMP_RET_TRAP);
+		d.instruction_pointer = STUB_ADDR;
+		test_int_eq(build_and_run(traps, 5, STUB_ADDR, 0, TEST_AUDIT_ARCH, &d), SECCOMP_RET_ALLOW);
+	}
+	struct test_seccomp_data d = {
+		.nr = TAWC_SYS_openat, .arch = TEST_AUDIT_ARCH,
+		.instruction_pointer = OUT_OF_STUB,
+	};
+	test_int_eq(build_and_run(traps, 5, STUB_ADDR, 0, TEST_AUDIT_ARCH, &d), SECCOMP_RET_TRAP);
 }

@@ -37,7 +37,8 @@ static uint32_t stub_lo_of(uint64_t a) { return (uint32_t)(a & 0xffffffffu); }
 static uint32_t stub_hi_of(uint64_t a) { return (uint32_t)(a >> 32); }
 
 /* Leaf actions of the NR search tree. */
-enum leaf_kind { LEAF_PLAIN, LEAF_CLOSE, LEAF_FCNTL, LEAF_CLONE, LEAF_SIGMASK };
+enum leaf_kind { LEAF_PLAIN, LEAF_CLOSE, LEAF_FCNTL, LEAF_CLONE, LEAF_SIGMASK,
+		 LEAF_MASKARG };
 
 struct build_ctx {
 	struct sock_filter *prog;
@@ -53,12 +54,22 @@ struct build_ctx {
 /* Search-tree leaves holding at most this many NRs are a JEQ chain. */
 #define LEAF_RUN 4
 
+/* Waits that take an optional signal mask: the argument holding it, or -1. */
+static int mask_arg(int nr)
+{
+	if (nr == TAWC_SYS_ppoll) return 3;
+	if (nr == TAWC_SYS_epoll_pwait || nr == TAWC_SYS_epoll_pwait2) return 4;
+	if (nr == TAWC_SYS_pselect6) return 5;
+	return -1;
+}
+
 static enum leaf_kind leaf_kind(const struct build_ctx *c, int nr)
 {
 	if (nr == TAWC_SYS_clone) return LEAF_CLONE;
 	if (nr == TAWC_SYS_close && c->close_floor > 0) return LEAF_CLOSE;
 	if (nr == TAWC_SYS_fcntl && c->close_floor > 0) return LEAF_FCNTL;
 	if (nr == TAWC_SYS_rt_sigprocmask) return LEAF_SIGMASK;
+	if (mask_arg(nr) >= 0) return LEAF_MASKARG;
 	return LEAF_PLAIN;
 }
 
@@ -70,6 +81,7 @@ static size_t action_len(enum leaf_kind k)
 	case LEAF_FCNTL: return 7;  /* + LD a1, JEQ, JEQ */
 	case LEAF_CLONE: return 4;  /* LD a0, JSET, RET ALLOW, JA ipcheck */
 	case LEAF_SIGMASK: return 8;
+	case LEAF_MASKARG: return 6;  /* LD lo, JEQ, LD hi, JEQ, JA ipcheck, RET ALLOW */
 	default:         return 1;  /* JA ipcheck */
 	}
 }
@@ -164,6 +176,18 @@ static int emit_tree(struct build_ctx *c, size_t lo, size_t hi)
 				    !emit(c, (struct sock_filter)TAWC_BPF_S(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)))
 					return 0;
 				break;
+			case LEAF_MASKARG: {
+				/* No mask means nothing to strip: run natively. */
+				uint32_t lo = 16 + 8 * (uint32_t)mask_arg(c->nrs[k]);
+				if (!emit(c, (struct sock_filter)TAWC_BPF_S(BPF_LD | BPF_W | BPF_ABS, lo)) ||
+				    !emit(c, (struct sock_filter)TAWC_BPF_J(BPF_JMP | BPF_JEQ | BPF_K, 0, 0, 2)) ||
+				    !emit(c, (struct sock_filter)TAWC_BPF_S(BPF_LD | BPF_W | BPF_ABS, lo + 4)) ||
+				    !emit(c, (struct sock_filter)TAWC_BPF_J(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0)) ||
+				    !emit_ja_ipcheck(c) ||
+				    !emit(c, (struct sock_filter)TAWC_BPF_S(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)))
+					return 0;
+				break;
+			}
 			default:
 				if (!emit_ja_ipcheck(c)) return 0;
 				break;
@@ -232,6 +256,7 @@ long tawcroot_build_filter(struct sock_filter *prog, size_t prog_cap,
 	 *     clone with CLONE_VM   → ALLOW   (threads, vfork)
  *     rt_sigprocmask that can't add to the mask
  *                           → ALLOW   (SIG_UNBLOCK, set == NULL)
+	 *     ppoll/pselect6/epoll_pwait{,2} without a mask → ALLOW
 	 *     otherwise             → ipcheck
 	 *   ipcheck: ip == stub     → ALLOW   (tawcroot's own syscalls)
 	 *            else           → TRAP

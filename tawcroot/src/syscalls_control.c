@@ -427,6 +427,75 @@ static long handle_rt_sigprocmask(const tawcroot_syscall_args *args,
 	return 0;
 }
 
+/* Syscalls that swap in a caller-supplied mask while they wait. A guest
+ * signal handler that runs during the wait inherits that mask, and its
+ * first trapped syscall (at least its rt_sigreturn) would then hit a
+ * blocked SIGSYS, which the kernel turns into a kill. JavaScriptCore's
+ * thread suspension sigsuspend()s with everything but its own signal
+ * blocked. Re-issue with SIGSYS removed; a signal during the wait runs
+ * its guest handler on top of this one, as the wait was not ours. */
+static long strip_mask(long *guest, uint64_t *buf)
+{
+	if (!*guest) return 0;
+	if (tawc_copy_from_guest(buf, 8, (const void *)(uintptr_t)*guest) < 0)
+		return TAWC_EFAULT;
+	*buf &= ~SIGSYS_BIT;
+	*guest = (long)buf;
+	return 0;
+}
+
+static long handle_rt_sigsuspend(const tawcroot_syscall_args *args,
+				 ucontext_t *uc)
+{
+	(void)uc;
+	uint64_t m;
+	long set = args->a;
+	if (args->b != 8) return TAWC_EINVAL;
+	long e = strip_mask(&set, &m);
+	if (e) return e;
+	return TAWC_RAW(TAWC_SYS_rt_sigsuspend, set, 8, 0, 0, 0, 0);
+}
+
+/* ppoll(fds, nfds, tsp, mask, size). The filter traps these four only
+ * with a mask (pselect6: with its mask/size pair). */
+static long handle_ppoll(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	uint64_t m;
+	long set = args->d;
+	long e = strip_mask(&set, &m);
+	if (e) return e;
+	return TAWC_RAW(TAWC_SYS_ppoll, args->a, args->b, args->c, set, args->e, 0);
+}
+
+/* epoll_pwait{,2}(epfd, events, max, timeout, mask, size). */
+static long handle_epoll_pwait(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	uint64_t m;
+	long set = args->e;
+	long e = strip_mask(&set, &m);
+	if (e) return e;
+	return TAWC_RAW(args->nr, args->a, args->b, args->c, args->d, set, args->f);
+}
+
+/* pselect6's sixth argument is { const sigset_t *mask; size_t size }. */
+static long handle_pselect6(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	struct { long mask; long size; } data;
+	uint64_t m;
+	if (!args->f)
+		return TAWC_RAW(TAWC_SYS_pselect6, args->a, args->b, args->c,
+				args->d, args->e, 0);
+	if (tawc_copy_from_guest(&data, sizeof data, (const void *)(uintptr_t)args->f) < 0)
+		return TAWC_EFAULT;
+	long e = strip_mask(&data.mask, &m);
+	if (e) return e;
+	return TAWC_RAW(TAWC_SYS_pselect6, args->a, args->b, args->c, args->d,
+			args->e, (long)&data);
+}
+
 #if defined(__x86_64__)
 /* x86_64 glibc's getpgrp(3) issues the legacy getpgrp syscall, which
  * Android's untrusted_app filter RET_TRAPs (bionic only ever calls
@@ -567,6 +636,11 @@ void tawcroot_control_register(void)
 	tawcroot_dispatch_install(TAWC_SYS_prctl,           handle_prctl);
 	tawcroot_dispatch_install(TAWC_SYS_rt_sigaction,    handle_rt_sigaction);
 	tawcroot_dispatch_install(TAWC_SYS_rt_sigprocmask,  handle_rt_sigprocmask);
+	tawcroot_dispatch_install(TAWC_SYS_rt_sigsuspend,   handle_rt_sigsuspend);
+	tawcroot_dispatch_install(TAWC_SYS_ppoll,           handle_ppoll);
+	tawcroot_dispatch_install(TAWC_SYS_pselect6,        handle_pselect6);
+	tawcroot_dispatch_install(TAWC_SYS_epoll_pwait,     handle_epoll_pwait);
+	tawcroot_dispatch_install(TAWC_SYS_epoll_pwait2,    handle_epoll_pwait);
 	/* Keep sigaltstack native: callers may unmap their stack before
 	 * disabling it. Trapping that disable would use the unmapped stack. */
 	/* io_uring_setup: deny with -ENOSYS so guest libraries fall back to
